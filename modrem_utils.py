@@ -6,18 +6,17 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import PredefinedSplit
 from sklearn.preprocessing import LabelEncoder
 
-
+layers_dict = {"visual": 0,
+               "verbal": 1,
+              # "location": 2,
+              # "temporal": 3,
+               }
 
 class Modrem_Exp(object):
     default_params = {"vec_len": 10,
                       "num_loc_items": 54,
                       "num_categories": 3,
                       "categories": ["face", "scene", "fruit"],
-                      "layers_dict": {"visual": 0,
-                                      "verbal": 1,
-                                      # "location": 2,
-                                      # "temporal": 3,
-                                      },
                       "loc_layers": ["visual", "verbal"],
                       "main_layers": ["visual"],
                       "ic_ratio": 1,
@@ -59,11 +58,11 @@ class Modrem_Exp(object):
         """
         beta = beta or self.params["beta"]
         # Initiate new information with zeros
-        new_state = np.full((len(self.params["layers_dict"]),
+        new_state = np.full((len(layers_dict),
                               self.params["vec_len"]),
                             np.nan)
 
-        for layer_ind in self.params["layers_dict"].values():
+        for layer_ind in layers_dict.values():
             # calculate new current state
             curr_in_similarity = np.dot(current_state[layer_ind], incoming_state[layer_ind])
             # Calculate Rho
@@ -72,7 +71,7 @@ class Modrem_Exp(object):
         return new_state
 
     def calc_similarity(self, probe, probe_layers, memstack):
-        similarity = np.full((len(memstack), len(self.params["layers_dict"])),
+        similarity = np.full((len(memstack), len(layers_dict)),
                              np.nan)
         # Convert probe layers to list if type is not list
         probe_layers = [probe_layers] if type(probe_layers) is not list else probe_layers
@@ -80,7 +79,7 @@ class Modrem_Exp(object):
         for i, probe_vector in enumerate(probe):
             similarity[:, i] = np.dot(memstack[:, i], probe_vector)
         # remove the non-computed layers
-        keep_layers = np.array([True if l in probe_layers else False for l in self.params["layers_dict"].keys()])
+        keep_layers = np.array([True if l in probe_layers else False for l in layers_dict.keys()])
         similarity = np.delete(similarity, ~keep_layers, axis=1).squeeze()
         # nonlinear scaling of the similarity values  (pulled from cmrwm-Polyn)
         if self.params['post_tau_style'] == 'power':
@@ -172,11 +171,11 @@ class Modrem_Exp(object):
         if params is None:
             params = self.params
         codes_arr = np.zeros((params["num_loc_items"],
-                              len(self.params["layers_dict"]),
+                              len(layers_dict),
                               params["vec_len"]))
         for layer in params["loc_layers"]:
             # first create visual codes
-            codes_arr[:, self.params["layers_dict"][layer]] = self._create_item_codes(params["vec_len"],
+            codes_arr[:, layers_dict[layer]] = self._create_item_codes(params["vec_len"],
                                                                             params["num_loc_items"],
                                                                             len(params["categories"]),
                                                                             params["ic_ratio"],)
@@ -195,18 +194,17 @@ class Modrem_Exp(object):
     def initialize_encoding_phase(self, **kwargs):
         if self.params["trial_reset"]:
             self.reset_current_trial()
-        rand_init_state = np.random.randn(len(self.params["layers_dict"]),
+        rand_init_state = np.random.randn(len(layers_dict),
                                           self.params["vec_len"])
         rand_init_state = rand_init_state / np.linalg.norm(rand_init_state, ord=2)
         self.current_state = np.any(self.current_state) or rand_init_state
         # Add the current state to the list of time steps in current trial
         self.current_trial.append(self.current_state)
         self.encoding_state, self.encoded_item = self._random_image(**kwargs)
-
         return None
 
     def get_clf_layer_inds(self):
-        return [self.params["layers_dict"][l] for l in self.params["main_layers"]]
+        return [layers_dict[l] for l in self.params["main_layers"]]
 
     def _get_current_memories(self, source):
         if source == "combined":
@@ -243,18 +241,6 @@ class Modrem_Exp(object):
         plt.legend()
         plt.show()
 
-    def _random_image(self, category=None, item=None, **kwargs):
-        if item is not None:
-            assert item in self.representations.representations.keys(), f"{item} does not exist"
-            incoming_img = item
-        elif category is not None:
-            assert category in self.params["categories"], f"{category} is not in current categories"
-            cat_img_list = [i for i in self.representations.representations.keys() if category in i]
-            incoming_img = np.random.choice(cat_img_list)
-        else:
-            incoming_img = np.random.choice(list(self.representations.representations.keys()))
-        print(f"Incoming image is {incoming_img}")
-        return self.representations.representations[incoming_img], incoming_img
 
     def reset_current_trial(self):
         self.current_trial = []
@@ -307,6 +293,7 @@ class Modrem_Exp(object):
         return new_state
 
 
+
     def simulate_replace_timestep(self, category=None, item=None,):
         if self.replacement_state is None:
             # find the current encoded category and choose an image not from this category
@@ -341,11 +328,6 @@ class Modrem_Exp(object):
         self.current_trial.append(new_state)
         self.memories.save_task_memory(new_state)
         return self.current_state
-
-
-
-
-
 
 
 
@@ -410,8 +392,10 @@ class Representations(object):
     def __init__(self,):
         self.representations = None
         self.labels = None
+        self.categories = None
+        self.vec_len = None
 
-    def save_representations(self, codes_arr, params, save_to_self=True):
+    def save_representations(self, codes_arr, params):
         # add some helper
         item_per_cat = params["num_loc_items"] // len(params["categories"])
         num_categories = len(params["categories"])
@@ -423,8 +407,76 @@ class Representations(object):
         for i, code in enumerate(codes_arr):
             representations[f"{params["categories"][i % num_categories]}_{code_nums[i]}"] = code
         # save the representations to self
-        if save_to_self:
-            self.representations = representations
+        self.representations = representations
+        self.categories = np.unique([k.rsplit("_")[0] for k in representations.keys()])
+        self.vec_len = codes_arr.shape[-1]
         return representations
+
+
+
+
+
+
+
+
+
+class ExternalInput(object):
+    def __init__(self,
+                 representations: Representations,
+                 category=None,
+                 item=None,):
+        self.representations = representations
+        self.image, self.image_name = self._random_image(category=category, item=item)
+
+    def _random_image(self, category=None, item=None, **kwargs):
+        if item is not None:
+            assert item in self.representations.representations.keys(), f"{item} does not exist"
+            incoming_img = item
+        elif category is not None:
+            assert category in self.representations.categories, f"{category} is not in current categories"
+            cat_img_list = [i for i in self.representations.representations.keys() if category in i]
+            incoming_img = np.random.choice(cat_img_list)
+        else:
+            incoming_img = np.random.choice(list(self.representations.representations.keys()))
+        print(f"Incoming image is {incoming_img}")
+        return self.representations.representations[incoming_img], incoming_img
+
+    def get_external_input(self):
+        return self.image
+
+class EncodingExternal(ExternalInput):
+    def get_external_input(self):
+        input = self.image.copy()
+        input[]
+
+
+class MaintainExternal(ExternalInput):
+    def get_external_input(self):
+        # return just noise for both visual and verbal layers
+        return np.random.randn(len(layers_dict),
+                               self.representations.vec_len,)
+
+class ReplaceExternal(ExternalInput):
+    def get_external_input(self):
+        # Simulate noise for visual layer and append the verbal layer
+        input = self.image.copy()
+        input[layers_dict["visual"]] = np.random.randn(self.representations.vec_len,)
+        return input
+
+
+
+
+
+
+
+
+
+class MemoryInput(object):
+    def __init__(self,
+                 memories: Memories, visual=None, verbal=None):
+        pass
+
+
+
 
 
