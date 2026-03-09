@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -18,8 +20,9 @@ class Modrem_Exp(object):
                       "num_categories": 3,
                       "categories": ["face", "scene", "fruit"],
                       "loc_layers": ["visual", "verbal"],
-                      "main_layers": ["visual"],
+                      "main_layers": ["visual", "verbal"],
                       "ic_ratio": 1,
+                      "em_ratio": 1,
                       "num_loc_repeats": 5,
                       "beta": 0.65,
                       "trial_reset": True,
@@ -27,100 +30,43 @@ class Modrem_Exp(object):
                       "post_tau": 8,
                       "mem_source": "combined",
                       "snr": 5,
+                      "init_state": "noise",
+                      "update_rules": {},
                       }
 
     plot_colors = ["orange", "blue", "purple"]
 
-    def __init__(self, params=None):
-        params = params or {}
-        self.params = self.default_params | params
-
+    def __init__(self, params=None, seed=None):
+        self.params = self.default_params | (params or {})
+        # initiate a Memories and a Representations object for storage
         self.memories = Memories()
         self.representations = Representations()
-        self.current_state = None
-        self.encoding_state = None
-        self.encoded_item = None
-        self.replacement_state = None
+        # create an RNG object to standardize random number generation
+        self.rng = np.random.default_rng(seed=seed)
+        # Initiate attributes to store current experiment states
+        self.current_state = self.initialize_state(init_state=self.params["init_state"])
+        self.encoding_representation = None
+        self.encoding_item_name = None
+        self.replacement_representation = None
+        self.replacement_item_name = None
+
+
+        #
         self.clf = None
         self.current_trial = []
+        #
+        self.update_mechanism = UpdateMechanism(rng=self.rng,
+                                                representations=self.representations,
+                                                memories=self.memories,
+                                                params=self.params,)
+
         self.current_similarity = {}
         self.label_encoder = LabelEncoder().fit(self.params["categories"])
 
     def __repr__(self):
         return f"Modrem_Exp(params={self.params})"
 
-    def calc_new_state(self, current_state, incoming_state, beta=None, **kwargs):
-        """
-        Calculates new state by updating state across layer
-        :param current_state:
-        :param incoming_state:
-        :return:
-        """
-        beta = beta or self.params["beta"]
-        # Initiate new information with zeros
-        new_state = np.full((len(layers_dict),
-                              self.params["vec_len"]),
-                            np.nan)
 
-        for layer_ind in layers_dict.values():
-            # calculate new current state
-            curr_in_similarity = np.dot(current_state[layer_ind], incoming_state[layer_ind])
-            # Calculate Rho
-            rho = np.sqrt(1 + (beta ** 2) * (curr_in_similarity ** 2 - 1)) - beta * curr_in_similarity
-            new_state[layer_ind] = rho * current_state[layer_ind] + beta * incoming_state[layer_ind]
-        return new_state
-
-    def calc_similarity(self, probe, probe_layers, memstack):
-        similarity = np.full((len(memstack), len(layers_dict)),
-                             np.nan)
-        # Convert probe layers to list if type is not list
-        probe_layers = [probe_layers] if type(probe_layers) is not list else probe_layers
-        # Calculate the dot product similarity
-        for i, probe_vector in enumerate(probe):
-            similarity[:, i] = np.dot(memstack[:, i], probe_vector)
-        # remove the non-computed layers
-        keep_layers = np.array([True if l in probe_layers else False for l in layers_dict.keys()])
-        similarity = np.delete(similarity, ~keep_layers, axis=1).squeeze()
-        # nonlinear scaling of the similarity values  (pulled from cmrwm-Polyn)
-        if self.params['post_tau_style'] == 'power':
-            scaled_similarity = similarity ** self.params['post_tau']
-        elif self.params['post_tau_style'] == 'exp':
-            scaled_similarity = 1 / np.exp((1 - similarity) * self.params['post_tau'])
-        elif self.params['post_tau_style'] == 'linear':
-            scaled_similarity = similarity
-        else:
-            # if the tau_style string is not in the list above
-            raise SyntaxError('tau_style not recognized')
-        # Save it into a dict
-        self.current_similarity = {"raw": similarity,
-                                   "scaled": scaled_similarity,}
-        return scaled_similarity
-
-    def _calc_similarity_weighted_rep(self, similarity, memstack):
-        # normalize similarity
-        similarity /= similarity.sum()
-        # weighted sum of memstack across memories
-        weighted_sum = (memstack * similarity[:, None, None]).sum(axis=0)
-        # normalize by each layer
-        return weighted_sum / np.linalg.norm(weighted_sum, ord=2, axis=1, keepdims=True)
-
-    def _calc_summed_similarity(self):
-        similarity = self.current_similarity["scaled"]
-        mult_vals = np.ones((len(similarity),))
-        for n_layer in range(similarity.shape[1]):
-            mult_vals *= similarity[:, n_layer]
-        # nonlinear scaling of the similarity values
-        if self.params['post_tau_style'] == 'power':
-            mult_vals = mult_vals ** self.params['post_tau']
-        elif self.params['post_tau_style'] == 'exp':
-            mult_vals = 1 / np.exp((1 - mult_vals) * self.params['post_tau'])
-        elif self.params['post_tau_style'] == 'linear':
-            pass
-        else:
-            # if the tau_style string is not in the list above
-            raise SyntaxError('tau_style not recognized')
-        self.current_similarity["cross_layer"] = mult_vals
-        return self.current_similarity
 
     def classifier_train(self):
         """
@@ -148,7 +94,7 @@ class Modrem_Exp(object):
         probas = np.zeros((len(self.params["categories"]),
                            len(self.current_trial)))
         for t, t_step in enumerate(self.current_trial):
-            probas[:, t] = clf.predict_proba(t_step[self.get_clf_layer_inds()])
+            probas[:, t] = clf.predict_proba(t_step[self.get_clf_layer_inds()].reshape(1, -1))
         return probas
 
     def _create_item_codes(self,
@@ -191,45 +137,38 @@ class Modrem_Exp(object):
         self.memories.save_loc_memories(np.asarray(loc_memories), np.asarray(labels))
         return loc_memories
 
-    def initialize_encoding_phase(self, **kwargs):
+    def initialize_state(self, init_state):
+        if init_state == "noise":
+            return simulate_normalized_noise(self.rng, (len(layers_dict), self.params["vec_len"]))
+        elif init_state == "zeros":
+            return np.zeros((len(layers_dict), self.params["vec_len"]))
+        else:
+            print(f"Unknown init state: {init_state}")
+
+    def initialize_trial(self, **kwargs):
         if self.params["trial_reset"]:
             self.reset_current_trial()
-        rand_init_state = np.random.randn(len(layers_dict),
-                                          self.params["vec_len"])
-        rand_init_state = rand_init_state / np.linalg.norm(rand_init_state, ord=2)
-        self.current_state = np.any(self.current_state) or rand_init_state
         # Add the current state to the list of time steps in current trial
         self.current_trial.append(self.current_state)
-        self.encoding_state, self.encoded_item = self._random_image(**kwargs)
+        # Also choose an image to be encoded
+        self.encoding_representation, self.encoding_item_name = self.representations.query_representations(**kwargs)
         return None
+
+    def initialize_replacement(self, category=None, item=None):
+        # find the current encoded category and choose an image not from this category
+        current_encoded_category = self.encoding_item_name.rsplit("_", 1)[0]
+        if item is not None:
+            assert item.rsplit("_", 1)[0] != current_encoded_category, f"{item} belongs to current encoded category: {current_encoded_category}"
+        elif category is not None:
+            assert category != current_encoded_category, f"{category} is the same as current encoded category: {current_encoded_category}"
+        else:
+            category = np.random.choice([c for c in self.params["categories"] if c != current_encoded_category])
+        self.replacement_representation, self.replacement_item_name = self.representations.query_representations(category=category, item=item)
+        return self.replacement_representation, self.replacement_item_name
+
 
     def get_clf_layer_inds(self):
         return [layers_dict[l] for l in self.params["main_layers"]]
-
-    def _get_current_memories(self, source):
-        if source == "combined":
-            memories = np.concatenate((self.memories.loc_memories,
-                                       self.memories.task_memories), axis=0)
-        elif source == "loc":
-            memories = self.memories.loc_memories
-        elif source == "task":
-            memories = self.memories.task_memories
-        else:
-            raise SyntaxError('source not recognized. Must be "combined" or "loc" or "task"')
-        return memories
-
-    def plot_current_similarity(self, simtype="scaled"):
-        assert simtype in ["raw", "scaled", "cross_layer"], f"simtype {simtype} not recognized"
-        fig, ax = plt.subplots()
-        x = np.arange(len(self.current_similarity[simtype]))
-        ax.bar(x,
-               self.current_similarity[simtype],
-               )
-        plt.axvline(len(self.memories.loc_memories), color='r')
-        plt.xlabel("Memory index")
-        plt.ylabel("Similarity")
-        plt.title("Similarity values across memories")
-        plt.show()
 
     def plot_current_trial(self, **kwargs):
         probas = self.classify_timepoints()
@@ -241,94 +180,99 @@ class Modrem_Exp(object):
         plt.legend()
         plt.show()
 
-
     def reset_current_trial(self):
         self.current_trial = []
-        self.encoding_state = None
-        self.current_state = None
-        self.encoded_item = None
-        self.replacement_state = None
+        self.current_state = self.initialize_state(init_state=self.params["init_state"])
+        self.encoding_representation = None
+        self.encoding_item_name = None
+        self.replacement_item_name = None
+        self.replacement_representation = None
 
     def reset_task_memories(self):
         self.memories.task_memories = None
 
-    def simulate_encoding_timestep(self,
-                                   incoming_information:np.ndarray=None,
-                                   **kwargs):
+    def simulate_step(self, phase,
+                      encode_category=None,
+                      encode_item=None,
+                      replace_category=None,
+                      replace_item=None,):
         if not self.current_trial:
-            self.initialize_encoding_phase(**kwargs)
-        # Find the incoming visual information
-        incoming_information = np.any(incoming_information) or self.encoding_state
-        new_state = self.calc_new_state(current_state=self.current_state,
-                                        incoming_state=incoming_information)
-        # Add the current state to the list of time steps in current trial and save to memories object
-        self.current_state = new_state
-        self.memories.save_task_memory(self.current_state)
-        self.current_trial.append(self.current_state)
-        return self.current_state
+            self.initialize_trial(category=encode_category,
+                                  item=encode_item)
+        if phase == "encode":
+            item_shown = self.encoding_item_name
+        elif phase == "replace":
+            if self.replacement_item_name is None:
+                self.initialize_replacement(category=replace_category,
+                                            item=replace_item)
+            item_shown = self.replacement_item_name
+        else:
+            item_shown = None
 
-    def simulate_maintain_timestep(self, variant="retrieval", **kwargs):
-        if variant == "retrieval":
-            new_state = self._simulate_maintain_timestep_retrieval(**kwargs)
-        elif variant == "decay":
-            raise NotImplementedError("decay variant not implemented")
+        new_state = self.update_mechanism.step(phase=phase,
+                                               current_state=self.current_state,
+                                               item=item_shown,
+                                               )
+
         # Now save the info into current trial
         self.current_state = new_state
         self.current_trial.append(new_state)
         self.memories.save_task_memory(new_state)
-        return
-
-    def _simulate_maintain_timestep_retrieval(self, source=None, **kwargs):
-        """
-        Simulates a maintain timestep using the retrieved memory variant
-        :return:
-        """
-        memstack = self._get_current_memories(source or self.params["mem_source"])
-        # Calculate the similarity-weighted average vector
-        similarity = self.calc_similarity(self.current_state,
-                                           self.params["main_layers"],
-                                           memstack=memstack)
-        incoming_state = self._calc_similarity_weighted_rep(similarity=similarity, memstack=memstack)
-        new_state = self.calc_new_state(self.current_state, incoming_state, **kwargs)
-        return new_state
-
-
-
-    def simulate_replace_timestep(self, category=None, item=None,):
-        if self.replacement_state is None:
-            # find the current encoded category and choose an image not from this category
-            current_encoded_category = self.encoded_item.rsplit("_", 1)[0]
-            if item is not None:
-                assert item.rsplit("_", 1)[0] != current_encoded_category, f"{item} belongs to current encoded category: {current_encoded_category}"
-            elif category is not None:
-                assert category != current_encoded_category, f"{category} is the same as current encoded category: {current_encoded_category}"
-            else:
-                category = np.random.choice([c for c in self.params["categories"] if c != current_encoded_category])
-            replace_img, item = self._random_image(category=category, item=item)
-            self.replacement_state = replace_img
-        else:
-            replace_img = self.replacement_state
-
-        # # Zero out all layers except verbal layer
-        # verbal_layer_bool = [False if n == self.params["layers_dict"]["verbal"] else True for n in range(len(self.params["layers_dict"])) ]
-        # replace_verbal_rep = replace_img.copy()
-        # replace_verbal_rep[verbal_layer_bool] = 0
-        # use similarity to verbal memory to obtain weighted visual information
-        memstack = self._get_current_memories(source="loc")
-        similarity = self.calc_similarity(probe=replace_img,
-                                          probe_layers="verbal",
-                                          memstack=memstack)
-        replace_state = self._calc_similarity_weighted_rep(similarity=similarity,
-                                                           memstack=memstack)
-        # Calculate the new state
-        new_state = self.calc_new_state(current_state=self.current_state,
-                                        incoming_state=replace_state)
-        # Save
-        self.current_state = new_state
-        self.current_trial.append(new_state)
-        self.memories.save_task_memory(new_state)
         return self.current_state
 
+
+    #
+    # def simulate_encoding_timestep(self, **kwargs):
+    #     if not self.current_trial:
+    #         self.initialize_trial(**kwargs)
+    #     # Take an encoding step
+    #     new_state = self.update_mechanism.step(phase="encode",
+    #                                            current_state=self.current_state,
+    #                                            item=self.encoding_item_name,
+    #                                            )
+    #     # Add the current state to the list of time steps in current trial and save to memories object
+    #     self.current_state = new_state
+    #     self.memories.save_task_memory(self.current_state)
+    #     self.current_trial.append(self.current_state)
+    #     return self.current_state
+    #
+    # def simulate_maintain_timestep(self, variant="retrieval", **kwargs):
+    #     if variant == "retrieval":
+    #         new_state = self.update_mechanism.step(phase="maintain",
+    #                                            current_state=self.current_state,
+    #                                            item=self.encoding_item_name,
+    #                                            )
+    #     elif variant == "decay":
+    #         raise NotImplementedError("decay variant not implemented")
+    #     # Now save the info into current trial
+    #     self.current_state = new_state
+    #     self.current_trial.append(new_state)
+    #     self.memories.save_task_memory(new_state)
+    #     return
+
+
+    #
+    #
+    # def simulate_replace_timestep(self, category=None, item=None,):
+    #     if self.replacement_state is None:
+    #         # find the current encoded category and choose an image not from this category
+    #         current_encoded_category = self.encoded_item.rsplit("_", 1)[0]
+    #         if item is not None:
+    #             assert item.rsplit("_", 1)[0] != current_encoded_category, f"{item} belongs to current encoded category: {current_encoded_category}"
+    #         elif category is not None:
+    #             assert category != current_encoded_category, f"{category} is the same as current encoded category: {current_encoded_category}"
+    #         else:
+    #             category = np.random.choice([c for c in self.params["categories"] if c != current_encoded_category])
+    #         replace_img, item = self._random_image(category=category, item=item)
+    #         self.replacement_state = replace_img
+    #     else:
+    #         replace_img = self.replacement_state
+    #
+    #     # Save
+    #     self.current_state = new_state
+    #     self.current_trial.append(new_state)
+    #     self.memories.save_task_memory(new_state)
+    #     return self.current_state
 
 
 
@@ -361,10 +305,12 @@ class Memories(object):
         return visual_codes[np.random.randint(len(visual_codes))]
 
     def reset_memories(self):
-        self.memories = None
         self.loc_memories = None
         self.task_memories = None
         print("Memories reset")
+
+    def reset_task_memories(self):
+        self.task_memories = np.array([])
 
     def save_loc_memories(self, loc_memories, labels):
         self.loc_memories = loc_memories
@@ -381,8 +327,21 @@ class Memories(object):
             self.task_memories = np.concatenate((self.task_memories, memory), axis=0)
 
 
-
-
+    def _get_current_memories(self, source):
+        if source == "combined":
+            if self.task_memories is None:
+                self.task_memories = np.empty((0,
+                                               self.loc_memories.shape[1],
+                                               self.loc_memories.shape[2],))
+            memories = np.concatenate((self.loc_memories,
+                                       self.task_memories), axis=0)
+        elif source == "loc":
+            memories = self.loc_memories
+        elif source == "task":
+            memories = self.task_memories
+        else:
+            raise SyntaxError('source not recognized. Must be "combined" or "loc" or "task"')
+        return memories
 
 
 
@@ -394,6 +353,9 @@ class Representations(object):
         self.labels = None
         self.categories = None
         self.vec_len = None
+
+    def __repr__(self):
+        return f"Representations object with {len(self.representations)} items from {self.categories} categories"
 
     def save_representations(self, codes_arr, params):
         # add some helper
@@ -412,69 +374,240 @@ class Representations(object):
         self.vec_len = codes_arr.shape[-1]
         return representations
 
-
-
-
-
-
-
-
-
-class ExternalInput(object):
-    def __init__(self,
-                 representations: Representations,
-                 category=None,
-                 item=None,):
-        self.representations = representations
-        self.image, self.image_name = self._random_image(category=category, item=item)
-
-    def _random_image(self, category=None, item=None, **kwargs):
+    def query_representations(self, category=None, item=None, **kwargs):
         if item is not None:
-            assert item in self.representations.representations.keys(), f"{item} does not exist"
+            assert item in self.representations.keys(), f"{item} does not exist"
             incoming_img = item
         elif category is not None:
-            assert category in self.representations.categories, f"{category} is not in current categories"
-            cat_img_list = [i for i in self.representations.representations.keys() if category in i]
+            assert category in self.categories, f"{category} is not in current categories"
+            cat_img_list = [i for i in self.representations.keys() if category in i]
             incoming_img = np.random.choice(cat_img_list)
         else:
-            incoming_img = np.random.choice(list(self.representations.representations.keys()))
+            incoming_img = np.random.choice(list(self.representations.keys()))
         print(f"Incoming image is {incoming_img}")
-        return self.representations.representations[incoming_img], incoming_img
+        return self.representations[incoming_img], incoming_img
 
-    def get_external_input(self):
-        return self.image
+def unit_length(vector):
+    return vector / np.linalg.norm(vector, ord=2)
 
-class EncodingExternal(ExternalInput):
-    def get_external_input(self):
-        input = self.image.copy()
-        input[]
-
-
-class MaintainExternal(ExternalInput):
-    def get_external_input(self):
-        # return just noise for both visual and verbal layers
-        return np.random.randn(len(layers_dict),
-                               self.representations.vec_len,)
-
-class ReplaceExternal(ExternalInput):
-    def get_external_input(self):
-        # Simulate noise for visual layer and append the verbal layer
-        input = self.image.copy()
-        input[layers_dict["visual"]] = np.random.randn(self.representations.vec_len,)
-        return input
+def simulate_normalized_noise(rng, size):
+    rand_init_state = rng.normal(size=size)
+    return unit_length(rand_init_state)
 
 
+class UpdateMechanism(object):
+    default_rules = {
+        "encode": {
+            "external": {"visual": "representation",
+                         "verbal": "noise"},
+            "memory": {"echo_layers": [],
+                       "noise_layers": ["visual", "verbal"]},
 
-
-
-
-
-
-
-class MemoryInput(object):
+        },
+        "maintain": {
+            "external": {"visual": "noise",
+                         "verbal": "noise"},
+            "memory": {"echo_layers": ["visual", "verbal"],
+                       "noise_layers": []}
+        },
+        "replace": {
+            "external": {"visual": "noise",
+                         "verbal": "representation"},
+            "memory": {"echo_layers": ["visual", "verbal"],
+                       "noise_layers": [],}
+        }
+    }
     def __init__(self,
-                 memories: Memories, visual=None, verbal=None):
-        pass
+                 rng,
+                 representations: Representations,
+                 memories: Memories,
+                 params: dict):
+        self.update_rules = self.default_rules | params["update_rules"]
+        self.rng = rng
+        self.representations = representations
+        self.memories = memories
+        self.params = params
+
+    def build_external_input(self, spec, item):
+        external_spec = spec["external"]
+        ext_state = np.zeros((len(layers_dict),
+                              self.representations.vec_len))
+        for layer, source in external_spec.items():
+            if source == "noise":
+                ext_state[layers_dict[layer]] = simulate_normalized_noise(self.rng,
+                                                                          size=self.representations.vec_len)
+            elif source == "representation":
+                ext_state[layers_dict[layer]] = self.representations.query_representations(item=item)[0][layers_dict[layer]]
+            else:
+                raise NotImplementedError(f"unknown source for external input: {source}")
+        return ext_state
+
+    def build_memory_input(self, spec, current_state):
+        memory_spec = spec["memory"]
+        # Calculate the echo
+        mem_state = self.calc_echo(probe=current_state,
+                                   probe_layers=memory_spec["echo_layers"],)
+        # Replace layers with noise as defined by noise layers
+        for layer in memory_spec["noise_layers"]:
+            mem_state[layers_dict[layer]] = simulate_normalized_noise(self.rng,
+                                                                      size=self.representations.vec_len)
+        return mem_state
+
+    def calc_echo(self, probe, probe_layers):
+        """
+        Calls the calc_similarity function to compute the similarity weighted echo
+        :param probe:
+        :param probe_layers:
+        :param similarity_type:
+        :return:
+        """
+        # pull the memstack
+        memstack = self.get_memstack()
+        if not probe_layers:
+            return np.zeros((probe.shape[0], probe.shape[1]))
+        # pull the scaled similarity
+        similarity = self.calc_similarity(probe=probe,
+                                          probe_layers=probe_layers,
+                                          memstack=memstack)["scaled"]
+        # Take the summed similarity across layers
+        if len(probe_layers) > 1:
+            similarity = self.calc_summed_similarity(similarity=similarity)
+        # normalize similarity
+        similarity /= similarity.sum()
+        # weighted sum of memstack across memories
+        weighted_sum = (memstack * similarity[:, None, None]).sum(axis=0)
+        # normalize by each layer
+        return weighted_sum / np.linalg.norm(weighted_sum, ord=2, axis=1, keepdims=True)
+
+    def calc_similarity(self,
+                        probe,
+                        probe_layers,
+                        memstack):
+        similarity = np.zeros((len(layers_dict), len(memstack)))
+        # Convert probe layers to list if type is not list
+        probe_layers = [probe_layers] if type(probe_layers) is not list else probe_layers
+        # Make sure probe is not 1 dimensional
+        probe = probe[np.newaxis, :] if probe.ndim == 1 else probe
+        # Calculate the dot product similarity
+        for i, probe_vector in enumerate(probe):
+            similarity[i, :] = np.dot(memstack[:, i], probe_vector)
+        # remove the non-computed layers
+        keep_layers = np.array([True if l in probe_layers else False for l in layers_dict.keys()])
+        similarity = np.delete(similarity, ~keep_layers, axis=0).squeeze()
+        # nonlinear scaling of the similarity values  (pulled from cmrwm-Polyn)
+        if self.params["post_tau_style"] == 'power':
+            scaled_similarity = similarity ** self.params["post_tau"]
+        elif self.params["post_tau_style"] == 'exp':
+            scaled_similarity = 1 / np.exp((1 - similarity) * self.params["post_tau"])
+        elif self.params["post_tau_style"] == 'linear':
+            scaled_similarity = similarity
+        else:
+            # if the tau_style string is not in the list above
+            raise SyntaxError('tau_style not recognized')
+        return {"raw": similarity, "scaled": scaled_similarity,}
+
+    def calc_summed_similarity(self, similarity):
+        """
+        Placeholder function to produce summed similarity across layers
+        :param similarity_dict:
+        :return:
+        """
+        mult_vals = np.ones((similarity.shape[-1],))
+        for n_layer in range(similarity.shape[0]):
+            mult_vals *= similarity[n_layer, :]
+        # nonlinear scaling of the similarity values
+        if self.params["post_tau_style"] == 'power':
+            mult_vals = mult_vals ** self.params["post_tau"]
+        elif self.params["post_tau_style"] == 'exp':
+            mult_vals = 1 / np.exp((1 - mult_vals) * self.params["post_tau"])
+        elif self.params["post_tau_style"] == 'linear':
+            pass
+        else:
+            # if the tau_style string is not in the list above
+            raise SyntaxError('tau_style not recognized')
+        return mult_vals
+
+    def calc_new_state(self,
+                       current_state,
+                       incoming_state):
+        """
+        Calculates new state by updating state across layer
+        :return:
+        """
+        beta = self.params["beta"]
+        # Initiate new information with zeros
+        new_state = np.full((len(layers_dict),
+                             self.params["vec_len"]),
+                            np.nan)
+        for layer_ind in layers_dict.values():
+            # calculate new current state
+            curr_in_similarity = np.dot(current_state[layer_ind], incoming_state[layer_ind])
+            # Calculate Rho
+            rho = np.sqrt(1 + (beta ** 2) * (curr_in_similarity ** 2 - 1)) - beta * curr_in_similarity
+            new_state[layer_ind] = rho * current_state[layer_ind] + beta * incoming_state[layer_ind]
+        return new_state
+
+    def get_memstack(self):
+        return self.memories._get_current_memories(self.params["mem_source"])
+
+    def step(self,
+             phase: str,
+             current_state: np.ndarray,
+             item: str,
+             ):
+        """
+        Takes a time step by updating the current state to a new state using phase rules
+        :param phase:
+        :param current_state:
+        :param item:
+        :return:
+        """
+        # Find the specifications for combining inputs for this phase
+        spec = self.update_rules[phase]
+        # Get the external input
+        # print(f"item for step is {item}")
+
+        ext_input = self.build_external_input(spec=spec, item=item)
+        # As well as the memory input
+        mem_input = self.build_memory_input(spec=spec, current_state=current_state)
+        # Then combine external input and memory input based on mixing ratio
+        incoming_state = unit_length(ext_input * self.params["em_ratio"] + mem_input)
+        return self.calc_new_state(current_state=current_state,
+                                   incoming_state=incoming_state)
+    #
+    # def plot_current_similarity(self, simtype="scaled"):
+    #     assert simtype in ["raw", "scaled", "cross_layer"], f"simtype {simtype} not recognized"
+    #     fig, ax = plt.subplots()
+    #     x = np.arange(len(self.current_similarity[simtype]))
+    #     ax.bar(x,
+    #            self.current_similarity[simtype],
+    #            )
+    #     plt.axvline(len(self.memories.loc_memories), color='r')
+    #     plt.xlabel("Memory index")
+    #     plt.ylabel("Similarity")
+    #     plt.title("Similarity values across memories")
+    #     plt.show()
+    #
+    #
+    #
+    #
+    # def maintain_retrieval_variant(self, source=None, **kwargs):
+    #     """
+    #     Simulates a maintain timestep using the retrieved memory variant
+    #     :return:
+    #     """
+    #     memstack = self._get_current_memories(source or self.params["mem_source"])
+    #     # Calculate the similarity-weighted average vector
+    #     similarity = self.calc_similarity(self.current_state,
+    #                                        self.params["main_layers"],
+    #                                        memstack=memstack)
+    #     incoming_state = self._calc_similarity_weighted_rep(similarity=similarity, memstack=memstack)
+    #     new_state = self.calc_new_state(self.current_state, incoming_state, **kwargs)
+    #     return new_state
+
+
+
+
 
 
 
