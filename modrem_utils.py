@@ -1,7 +1,6 @@
-from typing import Any
-
 import numpy as np
 import matplotlib.pyplot as plt
+import logging
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
@@ -14,25 +13,51 @@ layers_dict = {"visual": 0,
               # "temporal": 3,
                }
 
+
+def unit_length(vector):
+    return vector / np.linalg.norm(vector, axis=-1, ord=2, keepdims=True)
+
+
+def simulate_normalized_noise(rng, size):
+    rand_init_state = rng.normal(size=size)
+    return unit_length(rand_init_state)
+
+
+
+
+
 class Modrem_Exp(object):
-    default_params = {"vec_len": 10,
-                      "num_loc_items": 54,
-                      "num_categories": 3,
-                      "categories": ["face", "scene", "fruit"],
-                      "loc_layers": ["visual", "verbal"],
-                      "main_layers": ["visual", "verbal"],
-                      "ic_ratio": 1,
-                      "em_ratio": 1,
-                      "num_loc_repeats": 5,
-                      "beta": 0.65,
-                      "trial_reset": True,
-                      "post_tau_style": "exp",    # ["exp", "power", "linear"]
-                      "post_tau": 8,
-                      "mem_source": "combined",
-                      "snr": 5,
-                      "init_state": "noise",
-                      "update_rules": {},
-                      }
+    default_params = {# Experiment design
+        "num_loc_items": 54,
+        "num_categories": 3,
+        "categories": ["face", "scene", "fruit"],
+        "operations": ["maintain", "replace", "suppress"],
+        "num_loc_repeats": 5,
+        "num_main_trials": 270,
+        "timesteps_per_phase": 10,
+        "trial_reset": True,
+        # Model design
+        "vec_len": 10,
+        "loc_layers": ["visual", "verbal"],
+        # "main_layers": ["visual", "verbal"],
+        "clf_layers": ["visual"],
+        "ic_ratio": 1,    # item vs category ratio
+        "em_ratio": 1,    # external vs memory ratio
+        "beta": 0.65,
+        "tau_style": "linear",
+        "tau": 8,
+        "post_tau_style": "exp",  # ["exp", "power", "linear"]
+        "post_tau": 8,
+        "mem_source": "combined",
+        "snr": 5,    # signal to noise ratio (not implemented)
+        "echo_weights": {
+            "visual": 1,
+            "verbal": 1,
+        },
+        "update_rules": {},
+        "init_state": "noise",
+        "activation_intensity": False,
+    }
 
     plot_colors = ["orange", "blue", "purple"]
 
@@ -49,24 +74,20 @@ class Modrem_Exp(object):
         self.encoding_item_name = None
         self.replacement_representation = None
         self.replacement_item_name = None
-
-
-        #
-        self.clf = None
+        # Store current trial
         self.current_trial = []
         #
+        self.clf = None
+        self.label_encoder = LabelEncoder().fit(self.params["categories"])
         self.update_mechanism = UpdateMechanism(rng=self.rng,
                                                 representations=self.representations,
                                                 memories=self.memories,
                                                 params=self.params,)
-
-        self.current_similarity = {}
-        self.label_encoder = LabelEncoder().fit(self.params["categories"])
+        #
+        self.trials_data = []
 
     def __repr__(self):
         return f"Modrem_Exp(params={self.params})"
-
-
 
     def classifier_train(self):
         """
@@ -104,33 +125,47 @@ class Modrem_Exp(object):
                           ic_ratio, ):
         assert num_items % num_categories == 0, "num_items must be divisible by num_categories"
         # first create an array of item codes
-        item_codes = np.random.randn(num_items, vec_len)
+        item_codes = unit_length(np.random.randn(num_items, vec_len))
         # then create an array of category codes
-        cat_codes = np.random.randn(num_categories, vec_len)
-        cat_codes = np.tile(cat_codes, (num_items // num_categories, 1))
+        cat_codes = unit_length(np.random.randn(num_categories, vec_len))
+        # tile the cat codes across
+        cat_codes_tiled = np.tile(cat_codes, (num_items // num_categories, 1))
         # sum the two codes based on a weighting (Item:Category ratio)
-        combined_codes = item_codes * ic_ratio + cat_codes
-        # normalize the codes to unit length
-        return combined_codes / np.linalg.norm(combined_codes, axis=1, ord=2, keepdims=True)
+        combined_codes = item_codes * ic_ratio + cat_codes_tiled
+        # normalize the combined codes to unit length
+        combined_codes = unit_length(combined_codes)
+        return item_codes, cat_codes, combined_codes
 
     def create_loc_memories(self, params:dict = None):
         if params is None:
             params = self.params
-        codes_arr = np.zeros((params["num_loc_items"],
+        item_arr = np.zeros((params["num_loc_items"],
+                              len(layers_dict),
+                              params["vec_len"]))
+        cat_arr = np.zeros((params["num_categories"],
+                            len(layers_dict),
+                            params["vec_len"]))
+        combined_arr = np.zeros((params["num_loc_items"],
                               len(layers_dict),
                               params["vec_len"]))
         for layer in params["loc_layers"]:
             # first create visual codes
-            codes_arr[:, layers_dict[layer]] = self._create_item_codes(params["vec_len"],
+            item_layer, cat_layer, combined_layer = self._create_item_codes(params["vec_len"],
                                                                             params["num_loc_items"],
                                                                             len(params["categories"]),
                                                                             params["ic_ratio"],)
+            item_arr[:, layers_dict[layer]] = item_layer
+            cat_arr[:, layers_dict[layer]] = cat_layer
+            combined_arr[:, layers_dict[layer]] = combined_layer
         # Save the generated codes into representations object
-        representations = self.representations.save_representations(codes_arr, params)
+        representations = self.representations.save_representations(item_codes=item_arr,
+                                                                    cat_codes=cat_arr,
+                                                                    combined_codes=combined_arr,
+                                                                    params=params)
         loc_memories = []
         labels = []
         for n in range(params["num_loc_repeats"]):
-            for name, code in representations.items():
+            for name, code in representations["combined"].items():
                 loc_memories.append(code)
                 labels.append(name.rsplit("_", 1)[0])
         # save to memories object
@@ -145,13 +180,14 @@ class Modrem_Exp(object):
         else:
             print(f"Unknown init state: {init_state}")
 
-    def initialize_trial(self, **kwargs):
+    def initialize_trial(self, category=None, item=None):
         if self.params["trial_reset"]:
             self.reset_current_trial()
         # Add the current state to the list of time steps in current trial
         self.current_trial.append(self.current_state)
         # Also choose an image to be encoded
-        self.encoding_representation, self.encoding_item_name = self.representations.query_representations(**kwargs)
+        self.encoding_representation, self.encoding_item_name = self.representations.query_representations(category=category,
+                                                                                                           item=item,)
         return None
 
     def initialize_replacement(self, category=None, item=None):
@@ -168,7 +204,7 @@ class Modrem_Exp(object):
 
 
     def get_clf_layer_inds(self):
-        return [layers_dict[l] for l in self.params["main_layers"]]
+        return [layers_dict[l] for l in self.params["clf_layers"]]
 
     def plot_current_trial(self, **kwargs):
         probas = self.classify_timepoints()
@@ -176,6 +212,7 @@ class Modrem_Exp(object):
         x = np.arange(probas.shape[1])
         for i, cls in enumerate(probas):
             ax.plot(x, cls, color=self.plot_colors[i], label=self.label_encoder.inverse_transform([i])[0])
+        plt.ylim(0, 1)
         plt.title("Decoding of trial")
         plt.legend()
         plt.show()
@@ -191,20 +228,25 @@ class Modrem_Exp(object):
     def reset_task_memories(self):
         self.memories.task_memories = None
 
+    def simulate_experiment(self,
+                            stim_df):
+        trials_list = []
+        for _, row in stim_df.iterrows():
+            encode_item = "_".join([row.category, str(row.stim)])
+            replace_item = "_".join([row.replace_category, str(row.replace_stim)])
+            # Initialize the trial
+            self.initialize_trial(item=encode_item)
+            # run the trial
+            trials_list.append(self.simulate_trial(operation=row.operation,
+                                                   encode_item=encode_item,
+                                                   replace_item=replace_item))
+        return trials_list
+
     def simulate_step(self, phase,
-                      encode_category=None,
-                      encode_item=None,
-                      replace_category=None,
-                      replace_item=None,):
-        if not self.current_trial:
-            self.initialize_trial(category=encode_category,
-                                  item=encode_item)
+                      diagnostic=False):
         if phase == "encode":
             item_shown = self.encoding_item_name
         elif phase == "replace":
-            if self.replacement_item_name is None:
-                self.initialize_replacement(category=replace_category,
-                                            item=replace_item)
             item_shown = self.replacement_item_name
         else:
             item_shown = None
@@ -213,69 +255,39 @@ class Modrem_Exp(object):
                                                current_state=self.current_state,
                                                item=item_shown,
                                                )
+        if not diagnostic:
+            # Now save the info into current trial
+            self.current_state = new_state
+            self.current_trial.append(new_state)
+            self.memories.save_task_memory(new_state)
+        return new_state
 
-        # Now save the info into current trial
-        self.current_state = new_state
-        self.current_trial.append(new_state)
-        self.memories.save_task_memory(new_state)
-        return self.current_state
-
-
-    #
-    # def simulate_encoding_timestep(self, **kwargs):
-    #     if not self.current_trial:
-    #         self.initialize_trial(**kwargs)
-    #     # Take an encoding step
-    #     new_state = self.update_mechanism.step(phase="encode",
-    #                                            current_state=self.current_state,
-    #                                            item=self.encoding_item_name,
-    #                                            )
-    #     # Add the current state to the list of time steps in current trial and save to memories object
-    #     self.current_state = new_state
-    #     self.memories.save_task_memory(self.current_state)
-    #     self.current_trial.append(self.current_state)
-    #     return self.current_state
-    #
-    # def simulate_maintain_timestep(self, variant="retrieval", **kwargs):
-    #     if variant == "retrieval":
-    #         new_state = self.update_mechanism.step(phase="maintain",
-    #                                            current_state=self.current_state,
-    #                                            item=self.encoding_item_name,
-    #                                            )
-    #     elif variant == "decay":
-    #         raise NotImplementedError("decay variant not implemented")
-    #     # Now save the info into current trial
-    #     self.current_state = new_state
-    #     self.current_trial.append(new_state)
-    #     self.memories.save_task_memory(new_state)
-    #     return
-
-
-    #
-    #
-    # def simulate_replace_timestep(self, category=None, item=None,):
-    #     if self.replacement_state is None:
-    #         # find the current encoded category and choose an image not from this category
-    #         current_encoded_category = self.encoded_item.rsplit("_", 1)[0]
-    #         if item is not None:
-    #             assert item.rsplit("_", 1)[0] != current_encoded_category, f"{item} belongs to current encoded category: {current_encoded_category}"
-    #         elif category is not None:
-    #             assert category != current_encoded_category, f"{category} is the same as current encoded category: {current_encoded_category}"
-    #         else:
-    #             category = np.random.choice([c for c in self.params["categories"] if c != current_encoded_category])
-    #         replace_img, item = self._random_image(category=category, item=item)
-    #         self.replacement_state = replace_img
-    #     else:
-    #         replace_img = self.replacement_state
-    #
-    #     # Save
-    #     self.current_state = new_state
-    #     self.current_trial.append(new_state)
-    #     self.memories.save_task_memory(new_state)
-    #     return self.current_state
-
-
-
+    def simulate_trial(self, operation,
+                       encode_item=None,
+                       replace_item=None,
+                       diagnostic=False,
+                       **kwargs):
+        if self.params["trial_reset"]:
+            self.reset_current_trial()
+        # Initialize trial and replacement
+        self.initialize_trial(item=encode_item)
+        self.initialize_replacement(item=replace_item)
+        # Initiate trial data list
+        trial_data = []
+        for n in range(2):
+            trial_data.append(self.simulate_step(phase="noise",))
+        for phase in ["encode", operation]:
+            if diagnostic:
+                if operation == "replace":
+                    # print("pushing replacement representation to current state")
+                    # print("pre state", self.current_state)
+                    # print("replacement item", self.replacement_representation)
+                    self.current_state[layers_dict["verbal"]] = self.replacement_representation[layers_dict["verbal"]]
+                    # print("post state", self.current_state)
+            for n in range(self.params["timesteps_per_phase"]):
+                trial_data.append(self.simulate_step(phase=phase,))
+        self.trials_data.append(trial_data)
+        return trial_data
 
 
 
@@ -327,7 +339,7 @@ class Memories(object):
             self.task_memories = np.concatenate((self.task_memories, memory), axis=0)
 
 
-    def _get_current_memories(self, source):
+    def get_current_memories(self, source):
         if source == "combined":
             if self.task_memories is None:
                 self.task_memories = np.empty((0,
@@ -349,72 +361,99 @@ class Memories(object):
 
 class Representations(object):
     def __init__(self,):
-        self.representations = None
-        self.labels = None
+        self.representations = {"category": {},
+                                "item": {},
+                                "combined": {}}
         self.categories = None
         self.vec_len = None
+
 
     def __repr__(self):
         return f"Representations object with {len(self.representations)} items from {self.categories} categories"
 
-    def save_representations(self, codes_arr, params):
+
+    def save_representations(self, item_codes, cat_codes, combined_codes,
+                             params):
         # add some helper
         item_per_cat = params["num_loc_items"] // len(params["categories"])
         num_categories = len(params["categories"])
-        code_nums = [c for c in range(item_per_cat) for n in range(3)]
-        # Check that the number of items are divisible by number of categories
-        assert codes_arr.shape[0] % num_categories == 0, "number of unique items must be divisible by num_categories"
-        # Save the representations into a dictionary format
-        representations = {}
-        for i, code in enumerate(codes_arr):
-            representations[f"{params["categories"][i % num_categories]}_{code_nums[i]}"] = code
-        # save the representations to self
-        self.representations = representations
-        self.categories = np.unique([k.rsplit("_")[0] for k in representations.keys()])
-        self.vec_len = codes_arr.shape[-1]
-        return representations
+        code_nums = [c for c in range(item_per_cat) for n in range(num_categories)]
+        # # Check that the number of items are divisible by number of categories
+        # assert codes_arr.shape[0] % num_categories == 0, "number of unique items must be divisible by num_categories"
+        # Save category codes in representations
+        self.representations["category"] = {k: v for k, v in zip(params["categories"], cat_codes)}
+        # Save the item and combined representations by name
+        for i in range(params["num_loc_items"]):
+            item_name = f"{params["categories"][i % num_categories]}_{code_nums[i]}"
+            self.representations["item"][item_name] = item_codes[i]
+            self.representations["combined"][item_name] = combined_codes[i]
+        self.categories = params["categories"]
+        self.vec_len = combined_codes.shape[-1]
+        return self.representations
+
+
+    def query_category_representation(self, category):
+        return self.representations["category"][category]
+
+
+    def query_item_representation(self, item):
+        return self.representations["item"][item]
+
 
     def query_representations(self, category=None, item=None, **kwargs):
         if item is not None:
-            assert item in self.representations.keys(), f"{item} does not exist"
+            assert item in self.representations["combined"].keys(), f"{item} does not exist"
             incoming_img = item
         elif category is not None:
             assert category in self.categories, f"{category} is not in current categories"
-            cat_img_list = [i for i in self.representations.keys() if category in i]
+            cat_img_list = [i for i in self.representations["combined"].keys() if category in i]
             incoming_img = np.random.choice(cat_img_list)
         else:
-            incoming_img = np.random.choice(list(self.representations.keys()))
-        print(f"Incoming image is {incoming_img}")
-        return self.representations[incoming_img], incoming_img
+            incoming_img = np.random.choice(list(self.representations["combined"].keys()))
+        logging.info(f"Incoming image is {incoming_img}")
+        return self.representations["combined"][incoming_img], incoming_img
 
-def unit_length(vector):
-    return vector / np.linalg.norm(vector, ord=2)
 
-def simulate_normalized_noise(rng, size):
-    rand_init_state = rng.normal(size=size)
-    return unit_length(rand_init_state)
+
 
 
 class UpdateMechanism(object):
     default_rules = {
+        "noise": {
+            "external": {"visual": "noise",
+                         "verbal": "noise",},
+            "memory": {"echo_layers": [],
+                       "noise_layers": ["visual", "verbal"],
+                       "tau_dilation": 1},
+        },
         "encode": {
             "external": {"visual": "representation",
                          "verbal": "noise"},
             "memory": {"echo_layers": [],
-                       "noise_layers": ["visual", "verbal"]},
+                       "noise_layers": ["visual", "verbal"],
+                       "tau_dilation": 1},
 
         },
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
             "memory": {"echo_layers": ["visual", "verbal"],
-                       "noise_layers": []}
+                       "noise_layers": [],
+                       "tau_dilation": 1}
         },
         "replace": {
             "external": {"visual": "noise",
                          "verbal": "representation"},
             "memory": {"echo_layers": ["visual", "verbal"],
-                       "noise_layers": [],}
+                       "noise_layers": [],
+                       "tau_dilation": 1}
+        },
+        "suppress": {
+            "external": {"visual": "noise",
+                         "verbal": "noise"},
+            "memory": {"echo_layers": ["visual", "verbal"],
+                       "noise_layers": [],
+                       "tau_dilation": 0.5}
         }
     }
     def __init__(self,
@@ -444,21 +483,29 @@ class UpdateMechanism(object):
 
     def build_memory_input(self, spec, current_state):
         memory_spec = spec["memory"]
+        pre_tau = self.params["tau"] * memory_spec["tau_dilation"] if self.params[
+                                                                          "tau_style"] != "linear" else "linear"
+
+        post_tau = self.params["post_tau"] * memory_spec["tau_dilation"] if self.params[
+                                                                                "post_tau_style"] != "linear" else "linear"
         # Calculate the echo
         mem_state = self.calc_echo(probe=current_state,
-                                   probe_layers=memory_spec["echo_layers"],)
+                                   probe_layers=memory_spec["echo_layers"],
+                                   tau=pre_tau,
+                                   post_tau=post_tau,
+                                   intensity=self.params["activation_intensity"])
         # Replace layers with noise as defined by noise layers
         for layer in memory_spec["noise_layers"]:
             mem_state[layers_dict[layer]] = simulate_normalized_noise(self.rng,
                                                                       size=self.representations.vec_len)
         return mem_state
 
-    def calc_echo(self, probe, probe_layers):
+    def calc_echo(self, probe, probe_layers, tau=None, post_tau=None, intensity=True, diagnostic=False):
         """
         Calls the calc_similarity function to compute the similarity weighted echo
         :param probe:
         :param probe_layers:
-        :param similarity_type:
+        :param tau: parameter controlling 'sharpness' of similarity
         :return:
         """
         # pull the memstack
@@ -468,21 +515,31 @@ class UpdateMechanism(object):
         # pull the scaled similarity
         similarity = self.calc_similarity(probe=probe,
                                           probe_layers=probe_layers,
-                                          memstack=memstack)["scaled"]
+                                          memstack=memstack,
+                                          tau=tau)["scaled"]
         # Take the summed similarity across layers
         if len(probe_layers) > 1:
-            similarity = self.calc_summed_similarity(similarity=similarity)
-        # normalize similarity
-        similarity /= similarity.sum()
+            similarity = self.calc_summed_similarity(similarity=similarity,
+                                                     tau=post_tau,
+                                                     probe_layers=probe_layers,)
+        if not intensity:
+            # normalize similarity
+            similarity /= similarity.sum()
         # weighted sum of memstack across memories
         weighted_sum = (memstack * similarity[:, None, None]).sum(axis=0)
+        # if diagnoising, return the similarity
+        if diagnostic:
+            return similarity, weighted_sum
         # normalize by each layer
         return weighted_sum / np.linalg.norm(weighted_sum, ord=2, axis=1, keepdims=True)
 
     def calc_similarity(self,
                         probe,
                         probe_layers,
-                        memstack):
+                        memstack,
+                        tau=None):
+        # Declare tau
+        tau = tau or self.params["tau"]
         similarity = np.zeros((len(layers_dict), len(memstack)))
         # Convert probe layers to list if type is not list
         probe_layers = [probe_layers] if type(probe_layers) is not list else probe_layers
@@ -495,31 +552,37 @@ class UpdateMechanism(object):
         keep_layers = np.array([True if l in probe_layers else False for l in layers_dict.keys()])
         similarity = np.delete(similarity, ~keep_layers, axis=0).squeeze()
         # nonlinear scaling of the similarity values  (pulled from cmrwm-Polyn)
-        if self.params["post_tau_style"] == 'power':
-            scaled_similarity = similarity ** self.params["post_tau"]
-        elif self.params["post_tau_style"] == 'exp':
-            scaled_similarity = 1 / np.exp((1 - similarity) * self.params["post_tau"])
-        elif self.params["post_tau_style"] == 'linear':
+        if self.params["tau_style"] == 'power':
+            scaled_similarity = similarity ** tau
+        elif self.params["tau_style"] == 'exp':
+            scaled_similarity = 1 / np.exp((1 - similarity) * tau)
+        elif self.params["tau_style"] == 'linear':
             scaled_similarity = similarity
         else:
             # if the tau_style string is not in the list above
             raise SyntaxError('tau_style not recognized')
         return {"raw": similarity, "scaled": scaled_similarity,}
 
-    def calc_summed_similarity(self, similarity):
+    def calc_summed_similarity(self, similarity, tau=None, probe_layers=None):
         """
         Placeholder function to produce summed similarity across layers
         :param similarity_dict:
         :return:
         """
+        # Convert probe layers to list if type is not list
+        probe_layers = [probe_layers] if type(probe_layers) is not list else probe_layers
+        # Then order it by the layers dict
+        probe_layers = [l for l in sorted(layers_dict, key=lambda x: layers_dict[x]) if l in probe_layers]
+        # declare tau
+        tau = tau or self.params["post_tau"]
         mult_vals = np.ones((similarity.shape[-1],))
         for n_layer in range(similarity.shape[0]):
-            mult_vals *= similarity[n_layer, :]
+            mult_vals *= (similarity[n_layer, :] * self.params["echo_weights"][probe_layers[n_layer]])
         # nonlinear scaling of the similarity values
         if self.params["post_tau_style"] == 'power':
-            mult_vals = mult_vals ** self.params["post_tau"]
+            mult_vals = mult_vals ** tau
         elif self.params["post_tau_style"] == 'exp':
-            mult_vals = 1 / np.exp((1 - mult_vals) * self.params["post_tau"])
+            mult_vals = 1 / np.exp((1 - mult_vals) * tau)
         elif self.params["post_tau_style"] == 'linear':
             pass
         else:
@@ -548,7 +611,7 @@ class UpdateMechanism(object):
         return new_state
 
     def get_memstack(self):
-        return self.memories._get_current_memories(self.params["mem_source"])
+        return self.memories.get_current_memories(self.params["mem_source"])
 
     def step(self,
              phase: str,
@@ -566,44 +629,17 @@ class UpdateMechanism(object):
         spec = self.update_rules[phase]
         # Get the external input
         # print(f"item for step is {item}")
-
         ext_input = self.build_external_input(spec=spec, item=item)
         # As well as the memory input
         mem_input = self.build_memory_input(spec=spec, current_state=current_state)
+
         # Then combine external input and memory input based on mixing ratio
         incoming_state = unit_length(ext_input * self.params["em_ratio"] + mem_input)
         return self.calc_new_state(current_state=current_state,
                                    incoming_state=incoming_state)
-    #
-    # def plot_current_similarity(self, simtype="scaled"):
-    #     assert simtype in ["raw", "scaled", "cross_layer"], f"simtype {simtype} not recognized"
-    #     fig, ax = plt.subplots()
-    #     x = np.arange(len(self.current_similarity[simtype]))
-    #     ax.bar(x,
-    #            self.current_similarity[simtype],
-    #            )
-    #     plt.axvline(len(self.memories.loc_memories), color='r')
-    #     plt.xlabel("Memory index")
-    #     plt.ylabel("Similarity")
-    #     plt.title("Similarity values across memories")
-    #     plt.show()
-    #
-    #
-    #
-    #
-    # def maintain_retrieval_variant(self, source=None, **kwargs):
-    #     """
-    #     Simulates a maintain timestep using the retrieved memory variant
-    #     :return:
-    #     """
-    #     memstack = self._get_current_memories(source or self.params["mem_source"])
-    #     # Calculate the similarity-weighted average vector
-    #     similarity = self.calc_similarity(self.current_state,
-    #                                        self.params["main_layers"],
-    #                                        memstack=memstack)
-    #     incoming_state = self._calc_similarity_weighted_rep(similarity=similarity, memstack=memstack)
-    #     new_state = self.calc_new_state(self.current_state, incoming_state, **kwargs)
-    #     return new_state
+
+
+
 
 
 
