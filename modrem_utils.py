@@ -7,6 +7,8 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import PredefinedSplit
 from sklearn.preprocessing import LabelEncoder
 
+from scipy.special import softmax
+
 layers_dict = {"visual": 0,
                "verbal": 1,
               # "location": 2,
@@ -277,13 +279,13 @@ class Modrem_Exp(object):
         for n in range(2):
             trial_data.append(self.simulate_step(phase="noise",))
         for phase in ["encode", operation]:
-            if diagnostic:
-                if operation == "replace":
-                    # print("pushing replacement representation to current state")
-                    # print("pre state", self.current_state)
-                    # print("replacement item", self.replacement_representation)
-                    self.current_state[layers_dict["verbal"]] = self.replacement_representation[layers_dict["verbal"]]
-                    # print("post state", self.current_state)
+            # if diagnostic:
+            #     if operation == "replace":
+            #         # print("pushing replacement representation to current state")
+            #         # print("pre state", self.current_state)
+            #         # print("replacement item", self.replacement_representation)
+            #         self.current_state[layers_dict["verbal"]] = self.replacement_representation[layers_dict["verbal"]]
+            #         # print("post state", self.current_state)
             for n in range(self.params["timesteps_per_phase"]):
                 trial_data.append(self.simulate_step(phase=phase,))
         self.trials_data.append(trial_data)
@@ -558,6 +560,10 @@ class UpdateMechanism(object):
             scaled_similarity = 1 / np.exp((1 - similarity) * tau)
         elif self.params["tau_style"] == 'linear':
             scaled_similarity = similarity
+        elif self.params["tau_style"] == 'sigmoid':
+            scaled_similarity = 1 / (1 + np.exp(-(tau * similarity)))
+        elif self.params["tau_style"] == 'softmax':
+            mult_vals = softmax(similarity)
         else:
             # if the tau_style string is not in the list above
             raise SyntaxError('tau_style not recognized')
@@ -583,6 +589,10 @@ class UpdateMechanism(object):
             mult_vals = mult_vals ** tau
         elif self.params["post_tau_style"] == 'exp':
             mult_vals = 1 / np.exp((1 - mult_vals) * tau)
+        elif self.params["post_tau_style"] == 'sigmoid':
+            mult_vals = 1 / (1 + np.exp(-(tau * mult_vals)))
+        elif self.params["post_tau_style"] == 'softmax':
+            mult_vals = softmax(mult_vals)
         elif self.params["post_tau_style"] == 'linear':
             pass
         else:

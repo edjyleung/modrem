@@ -5,7 +5,7 @@ import KimEtal2020_sim as KE
 from scipy.stats import sem
 import re
 
-
+#%%
 mem_params = {  # Experiment design
     "num_loc_items": 54,
     "num_categories": 3,
@@ -13,7 +13,7 @@ mem_params = {  # Experiment design
     "operations": ["maintain", "replace", "suppress", ], # "noise"
     "num_loc_repeats": 5,
     "num_main_trials": 270,
-    "timesteps_per_phase": 10,
+    "timesteps_per_phase": 20,
     "trial_reset": True,
     # Model design
     "vec_len": 10,
@@ -22,11 +22,11 @@ mem_params = {  # Experiment design
     "clf_layers": ["visual"],
     "ic_ratio": 1,  # item vs category ratio
     "em_ratio": 1,  # external vs memory ratio
-    "beta": 0.65,
-    "tau_style": "linear",
-    "tau": 16,
+    "beta": 0.85,
+    "tau_style": "softmax",
+    "tau": 8,
     "post_tau_style": "linear",  # ["exp", "power", "linear"]
-    "post_tau": 1,
+    "post_tau": 6,
     "mem_source": "combined",
     "snr": 5,  # signal to noise ratio (not implemented)
     "echo_weights": {
@@ -34,13 +34,13 @@ mem_params = {  # Experiment design
         "verbal": 1,
     },
     "update_rules": {
-        # "encode": {
-        # "external": {"visual": "representation",
-        #              "verbal": "noise"},
-        # "memory": {"echo_layers": ["visual", "verbal"],
-        #            "noise_layers": [],
-        #            "tau_dilation": 1},
-        # },
+        "encode": {
+        "external": {"visual": "representation",
+                     "verbal": "noise"},
+        "memory": {"echo_layers": ["visual", "verbal"],
+                   "noise_layers": [],
+                   "tau_dilation": 1},
+        },
         "replace": {
             "external": {"visual": "noise",
                          "verbal": "representation"},
@@ -51,7 +51,7 @@ mem_params = {  # Experiment design
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual",],
+            "memory": {"echo_layers": ["visual"],
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
@@ -136,7 +136,8 @@ def simulate_full_experiment(mem_params, n_participants=30, **kwargs):
     plt.axvline(mem_params["timesteps_per_phase"] + 2, color="k", linestyle="--")
     pattern = "|".join(map(re.escape, ["ual", "bal", "{", "}", ":", "'", " "]))
     echweights = re.sub(pattern, "", str(mem_params["echo_weights"]))
-    plt.title(f"t={mem_params['post_tau']}, tStyle={mem_params["post_tau_style"]}, echoWeights={echweights}, ic={mem_params['ic_ratio']},em={mem_params['em_ratio']},b={mem_params['beta']}")
+    #  echoWeights={echweights}
+    plt.title(f"t={mem_params['tau']}, tStyle={mem_params["tau_style"]}, pt={mem_params["post_tau"]}, ptStyle={mem_params["post_tau_style"]}, ic={mem_params['ic_ratio']},em={mem_params['em_ratio']},b={mem_params['beta']}")
     plt.show()
     return {"results": results_arr, "params": mem_params}
 
@@ -169,15 +170,20 @@ encode_phase = "encode"
 for n in range(num_enc):
     new_state = Exp.simulate_step(phase=encode_phase,
                                   diagnostic=True,)
+    # New state is the combined ext+memory after stepping
     vis_sim.append(Exp.update_mechanism.calc_echo(probe=new_state,
                                                   probe_layers=["visual"],
+                                                  intensity=True,
                                                   diagnostic=True)[0])
     ver_sim.append(Exp.update_mechanism.calc_echo(probe=new_state,
                                                   probe_layers=["verbal"],
+                                                  intensity=True,
                                                   diagnostic=True)[0])
     comb_sim.append(Exp.update_mechanism.calc_echo(probe=new_state,
                                                   probe_layers=["visual", "verbal"],
-                                                  diagnostic=True)[0])
+                                                   intensity=True,
+                                                   diagnostic=True,
+                                                   )[0])
     current_step = Exp.simulate_step(phase=encode_phase,)
 
 
@@ -209,9 +215,9 @@ for n in range(num_enc):
 oper = "replace"
 maintain_portion = []
 # Artificially push replacement representation into verbal layer
-Exp.current_state[1] = Exp.replacement_representation[1]
+# Exp.current_state[1] = Exp.replacement_representation[1]
 for n in range(10):
-    print(Exp.replacement_representation)
+    # print(Exp.replacement_representation)
     new_state = Exp.simulate_step(phase=oper,
                                   diagnostic=True,)
     vis_sim.append(Exp.update_mechanism.calc_echo(probe=new_state,
@@ -228,7 +234,7 @@ for n in range(10):
                                      diagnostic=False,)
 
 
-# Plot all three traces
+# Plot all three similarity traces for each step
 for s in range(len(vis_sim)):
     fig, ax = plt.subplots()
     x = np.arange(len(vis_sim[s]))
@@ -239,10 +245,16 @@ for s in range(len(vis_sim)):
     ax.plot(x, ver_sim[s], label="verbal", color="green", alpha=0.5)
     ax.plot(x, comb_sim[s], label="combined", color="black")
     ax.axvline(269, color="r", linestyle="--", label="end of localizer")
+    # also plot a line for the encoded image and the replacement image in the localizer
+    for r_rep in np.unique(np.where(Exp.memories.loc_memories == Exp.replacement_representation)[0]):
+        ax.axvline(r_rep, color="darkblue", linestyle="--", label="replacement image in loc", alpha=0.2)
+    for e_rep in np.unique(np.where(Exp.memories.loc_memories == Exp.encoding_representation)[0]):
+        ax.axvline(e_rep, color="black", linestyle="--", label="encoding image in loc", alpha=0.2)
+
     phase = "encode" if s < 10 else oper
     secax_y = ax.secondary_yaxis('right', transform=ax.transData)
     secax_y.set_ylabel('cumulative sum')
-    ax.legend()
+    # ax.legend()
     plt.title(f"Step {s} tau:{mem_params['post_tau']} phase:{phase}")
     plt.ylim(0, 1)
     plt.ylabel("similarity")
@@ -289,6 +301,20 @@ plt.title(f"Probas tau:{mem_params['post_tau']}")
 plt.show()
 
 #%%
+styles = ["exp", "linear", "power", "sigmoid", "softmax"]
+from itertools import combinations, permutations, combinations_with_replacement
+# for tau_style, post_tau_style in combinations_with_replacement(styles, 2):
+# for t in np.linspace(-1, 1.3, 8):
+mem_params["tau"] = 8
+mem_params["tau_style"] = "exp"
+mem_params["post_tau"] = 1
+mem_params["post_tau_style"] = "linear"
+mem_params["beta"] = 0.99
+mem_params["em_ratio"] = 0.9
+mem_params["timesteps_per_phase"] = 15
+mem_params["update_rules"]["suppress"]["memory"]["tau_dilation"] = 0.65
+mem_params["operations"] = ["maintain", "replace", "suppress"] # , "noise"
+# print(f"testing: tau={tau_style}, post_tau={post_tau_style}")
 diagnostic = False
 # Build a stim list
 df = KE.build_stims_Kim2020neuro(mem_params)
@@ -296,10 +322,17 @@ df = KE.build_stims_Kim2020neuro(mem_params)
 # results = simulate_participant(mem_params=mem_params,
 #                      diagnostic=diagnostic,
 #                      )
+
 results = simulate_full_experiment(mem_params=mem_params,
                                    n_participants=20,
                                    diagnostic=diagnostic)
-
+    # try:
+    #     results = simulate_full_experiment(mem_params=mem_params,
+    #                                    n_participants=20,
+    #                                    diagnostic=diagnostic)
+    # except Exception as e:
+    #     print(f"tau={tau_style}, post_tau={post_tau_style} failed: {e}")
+    #
 
 ####################################################################################################################
 #%%
