@@ -2,17 +2,26 @@ import numpy as np
 import pandas as pd
 from itertools import permutations
 import matplotlib.pyplot as plt
+import re
+from tqdm import tqdm
+from joblib import Parallel, delayed
+
+from scipy.stats import sem
+from mne.stats import permutation_cluster_1samp_test
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import PredefinedSplit
 from sklearn.metrics import roc_auc_score
 
+from modrem_utils import Modrem_Exp, layers_dict
+
+
 def build_stims_Kim2020neuro(params):
     # initiate all unique conditions
     conditions = [(cat, rep_cat, oper) for cat, rep_cat in permutations(params["categories"], 2)
-                                     for oper in params["operations"]]
-    df = pd.DataFrame(conditions, columns = ["category", "replace_category", "operation"])
+                  for oper in params["operations"]]
+    df = pd.DataFrame(conditions, columns=["category", "replace_category", "operation"])
     num_main_trials = params["num_main_trials"]
     df = pd.concat([df] * (num_main_trials // len(conditions)))
     valid_seq = False
@@ -22,10 +31,12 @@ def build_stims_Kim2020neuro(params):
                             (df.operation == df.operation.shift(2)) &
                             (df.operation == df.operation.shift(3)))
     # initiate the stims dict
-    assert params["num_loc_items"] % params["num_categories"] == 0, "num loc items are not fully divisible by num categories"
+    assert params["num_loc_items"] % params[
+        "num_categories"] == 0, "num loc items are not fully divisible by num categories"
     num_items_per_cat = params["num_loc_items"] // params["num_categories"]
     num_cat_repeats = num_main_trials // params["num_loc_items"] * 2
-    stims_dict = {cat: [i for n in range(num_cat_repeats) for i in np.random.permutation(np.arange(num_items_per_cat))] for cat in params["categories"] }
+    stims_dict = {cat: [i for n in range(num_cat_repeats) for i in np.random.permutation(np.arange(num_items_per_cat))]
+                  for cat in params["categories"]}
     stims_list = []
     replace_list = []
     for _, r in df.iterrows():
@@ -61,7 +72,6 @@ def decode_category(exp, data=None):
         probas[trial] = clf.predict_proba(data[trial, :, exp.get_clf_layer_inds()].reshape((n_timepoints, -1)))
         decfunc[trial] = clf.decision_function(data[trial, :, exp.get_clf_layer_inds()].reshape((n_timepoints, -1)))
     return {"proba": probas, "decfunc": decfunc}
-
 
 
 def summarize_cat_decoding(exp,
@@ -100,10 +110,13 @@ def summarize_cat_decoding(exp,
               "suppress": "firebrick",
               "replace_old": "darkblue",
               "replace_new": "cornflowerblue"}
+    oper_list = []
     # graph each operation
     for o, oper in enumerate(operations):
+        oper_list.append(oper)
         oper_inds = df.operation == (oper if oper not in ["replace_old", "replace_new"] else "replace")
-        corr_label_oper = correct_label[oper_inds] if oper != "replace_new" else exp.label_encoder.transform(df.replace_category)[oper_inds]
+        corr_label_oper = correct_label[oper_inds] if oper != "replace_new" else \
+        exp.label_encoder.transform(df.replace_category)[oper_inds]
         if summary_value == "rocauc":
             for tp in range(values.shape[1]):
                 results_arr[tp, o] = roc_auc_score(y_true=corr_label_oper,
@@ -122,10 +135,325 @@ def summarize_cat_decoding(exp,
         plt.axvline(exp.params["timesteps_per_phase"] - 1, linestyle="--", color="k")
         plt.legend()
         plt.show()
-    return results_arr
+    return {"results": results_arr, "operations": oper_list}
 
-def item_RSA():
+
+def item_RSA(exp, ):
     pass
 
 
+def simulate_participant(params,
+                         diagnostic=False,
+                         **kwargs):
+    """
 
+    :param params:
+    :param diagnostic:
+    :param kwargs:
+    :return: Exp object
+             trials_list: list, with dimensions (n_trials, n_timepoints, n_layers, n_features)
+                        --The neural activity for each trial
+
+    """
+    # Initiate the experiment object
+    Exp = Modrem_Exp(params)
+    #  Initiate localizer memories
+    loc_memories = Exp.create_loc_memories()
+    # train classifier
+    clf = Exp.classifier_train()
+    # Set up stim list
+    Exp.stim_df = build_stims_Kim2020neuro(params)
+    # Simulate the entire experiment
+    if not diagnostic:
+        trials_list = Exp.simulate_experiment()
+        return Exp
+    else:
+        trials_list = []
+        for _, row in Exp.stim_df.iterrows():
+            encode_item = "_".join([row.category, str(row.stim)])
+            replace_item = "_".join([row.replace_category, str(row.replace_stim)])
+            # Initialize the trial
+            Exp.initialize_trial(item=encode_item)
+
+            # run the trial
+            trials_list.append(Exp.simulate_trial(operation=row.operation,
+                                                  encode_item=encode_item,
+                                                  replace_item=replace_item,
+                                                  diagnostic=diagnostic))
+        return trials_list
+
+
+def simulate_full_experiment(params,
+                             n_participants=30,
+                             n_jobs=1,
+                             **kwargs):
+    # exp_list = []
+    # for n in tqdm(range(n_participants)):
+    #     Exp = simulate_participant(params=params,
+    #                                summary_value="evidence",
+    #                                **kwargs
+    #                                )
+    #     exp_list.append(Exp)
+    exp_list = Parallel(n_jobs=n_jobs)(
+        delayed(simulate_participant)(params=params,
+                                      summary_value="evidence",
+                                      **kwargs) for n in tqdm(range(n_participants))
+    )
+    return exp_list
+
+
+def timecourse_cat_decoding(exp_list,
+                            params):
+    """
+    Kim et al. (2020) Graph 4a: Timecourse for neural decoding of a WM item
+    --Also outputs
+    :param exp_list:
+    :return: results_arr (array)
+    """
+    results = []
+    opers_list = []
+    for e, exp in enumerate(exp_list):
+        results_dict = decode_category(exp=exp,
+                                       data=None)
+
+        res_dict = summarize_cat_decoding(exp=exp,
+                                          results_dict=results_dict,
+                                          df=exp.stim_df,
+                                          summary_value="evidence",
+                                          graph=False)
+
+        results.append(res_dict["results"])
+        opers_list.append(res_dict["operations"])
+
+    ####
+    # convert results list to array
+    results_arr = np.asarray(results)
+    # Take operations order from opers_list
+    operations = np.unique(opers_list, axis=0).squeeze()
+    if operations.ndim > 1:
+        raise ValueError("There are more than one unique operations order:\n", operations)
+    # Now graph it
+    colors = {"maintain": "forestgreen",
+              "suppress": "firebrick",
+              "replace_new": "cornflowerblue",
+              "replace_old": "darkblue",
+              "enconly": "darkgray",
+              "noise": "black",
+              }
+    fig, ax = plt.subplots()
+    x = np.arange(1, results_arr.shape[1] + 1)
+    y_mean = results_arr.mean(axis=0)
+    y_se = sem(results_arr, axis=0)
+    for o, oper in enumerate(operations):
+        plt.plot(x, y_mean[:, o], label=oper, color=colors[oper])
+        plt.fill_between(x, y_mean[:, o] + y_se[:, o], y_mean[:, o] - y_se[:, o], color=colors[oper], alpha=0.2)
+    plt.legend(loc="upper right")
+    plt.axvline(params["timesteps_per_phase"] + 2, color="k", linestyle="--")
+    plt.axvline(int(params["timesteps_per_phase"] * 2) + 2, color="k", linestyle="--", label="fixation_start")
+    pattern = "|".join(map(re.escape, ["ual", "bal", "{", "}", ":", "'", " "]))
+    echweights = re.sub(pattern, "", str(params["echo_weights"]))
+    #  echoWeights={echweights}
+    plt.title(
+        f"t={params['tau']}, tStyle={params["tau_style"]}, pt={params["post_tau"]}, ptStyle={params["post_tau_style"]}, ic={params['ic_ratio']},em={params['em_ratio']},b={params['beta']}")
+    plt.show()
+    return results_arr
+
+
+def permtest_1d(X,
+                tail=0,
+                p_thresh=0.05):
+    tobs, clusters, clusters_pv, _ = permutation_cluster_1samp_test(X,
+                                                                    tail=tail, )
+    # recreate the original array
+    pvals = np.ones(X.shape[1])
+    if len(clusters) == 0:
+        return pvals, []
+    for c, clus in enumerate(clusters):
+        pvals[clus] = clusters_pv[c]
+    sigs = np.where(pvals < p_thresh)[0]
+    return pvals, sigs
+
+
+def graph_operDiff_catDecode(exp_list,
+                             params,
+                             ):
+    """
+    Kim et al. (2020) Graph 4b[i]: Trajectory for removal of an item [category]
+    :param exp_list:
+    :param params:
+    :return: None
+    """
+    results = []
+    opers_list = []
+    for e, exp in enumerate(exp_list):
+        results_dict = decode_category(exp=exp,
+                                       data=None)
+
+        res_dict = summarize_cat_decoding(exp=exp,
+                                          results_dict=results_dict,
+                                          df=exp.stim_df,
+                                          summary_value="evidence",
+                                          graph=False)
+
+        results.append(res_dict["results"])
+        opers_list.append(res_dict["operations"])
+
+    # Save the ind numbers
+    main_ind = np.unique(opers_list, axis=0).squeeze().tolist().index("maintain")
+    supp_ind = np.unique(opers_list, axis=0).squeeze().tolist().index("suppress")
+    rep_ind = np.unique(opers_list, axis=0).squeeze().tolist().index("replace_old")
+    # Subtract each trace from maintain
+    results_arr = np.asarray(results)
+    # Perform subtractions
+    diff_dict = {"replace": results_arr[..., rep_ind] - results_arr[..., main_ind],
+                 "suppress": results_arr[..., supp_ind] - results_arr[..., main_ind],
+                 }
+    colors_dict = {"replace": "darkblue",
+                   "suppress": "firebrick", }
+    # plot these traces
+    fig, ax = plt.subplots()
+    for i, (oper, res) in enumerate(diff_dict.items()):
+        # Run permutation testing for these traces (test against 0)
+        pvals, sigs = permtest_1d(res, tail=-1)
+        # Get mean and sem
+        means = res.mean(axis=0)
+        sems = sem(res, axis=0)
+        plt.fill_between(np.arange(res.shape[1]), means + sems, means - sems, color=colors_dict[oper], label=oper)
+        # plot the sigs
+        plt.plot(sigs, [0.07 + 0.02 * i] * len(sigs), color=colors_dict[oper], linewidth=4)
+        # for s in sigs:
+        #     plt.text(s, 0.09 + 0.01 * i , "*", )
+    plt.axvline(params["timesteps_per_phase"] + 1, color="k", alpha=0.5, linestyle="--")
+    plt.axvline(params["timesteps_per_phase"] * 2 + 1, color="k", alpha=0.5, linestyle="--")
+    plt.ylim(top=0.13)
+    plt.title("Trajectory for removal of an item [category]")
+    plt.ylabel("classifier evidence\n(removal - maintain)")
+    plt.show()
+    return None
+
+
+def calculate_item_RSA(exp,
+                       similarity_coefficient="pearson",
+                       fisher=True,
+                       layers=None, ):
+    # Obtain the encoded item for each trial
+    item_reps_list = []
+    for _, r in exp.stim_df.iterrows():
+        item_reps_list.append(
+            exp.representations.query_item_representation(f"{r.category}_{r.stim}")
+        )
+    item_reps_arr = np.array(item_reps_list)
+    # Obtain trials data
+    trials_data_arr = np.asarray(exp.trials_data)
+    # Convert layers to list if it is a str
+    if type(layers) is str:
+        layers = [layers]
+    # Subselect layers if necessary
+    if layers:
+        # find the indices
+        layer_inds = [layers_dict[l] for l in layers]
+        # then subselect
+        item_reps_arr = item_reps_arr[:, layer_inds]
+        trials_data_arr = trials_data_arr[:, :, layer_inds]
+    if similarity_coefficient == "pearson":
+        # reshape to flatten across layers
+        item_reps_arr = item_reps_arr.reshape(item_reps_arr.shape[0], -1)
+        trials_data_arr = trials_data_arr.reshape(trials_data_arr.shape[0], trials_data_arr.shape[1], -1)
+        # mean-center
+        item_reps_arr = item_reps_arr - item_reps_arr.mean(axis=-1, keepdims=True)
+        trials_data_arr = trials_data_arr - trials_data_arr.mean(axis=-1, keepdims=True)
+        # Normalize each vector
+        item_reps_arr = item_reps_arr / np.linalg.norm(item_reps_arr, axis=-1, keepdims=True)
+        trials_data_arr = trials_data_arr / np.linalg.norm(trials_data_arr, axis=-1, keepdims=True)
+        # perform correlation
+        corr = np.einsum("it,ijt->ij", item_reps_arr, trials_data_arr)
+    elif similarity_coefficient == "cosine":
+        # Dot the two arrays to obtain representational similarity for each layer
+        layered_similarity = np.einsum("ijab,iab->ija", trials_data_arr, item_reps_arr)
+        # Then average across layers
+        corr = layered_similarity.mean(axis=-1)
+    if fisher:
+        corr = np.arctanh(corr)
+    return corr
+
+
+def graph_operDiff_itemRSA(exp_list,
+                           params,
+                           **kwargs):
+    """
+    Graph 4b[i]: Trajectory for removal of an item [category]
+    :param layers:
+    :param exp_list:
+    :param params:
+    :return:
+    """
+
+    results_dict = {op: [] for op in params["operations"]}
+
+    # Loop through each list
+    for e, exp in enumerate(exp_list):
+        # calculate representational similarity
+        corr = calculate_item_RSA(exp,
+                                  similarity_coefficient="pearson",
+                                  **kwargs)
+        # Index and average across trials within operation
+        for oper in params["operations"]:
+            # subselect the trial indices
+            oper_inds = np.where(exp.stim_df.operation == oper)[0]
+            results_dict[oper].append(corr[oper_inds].mean(axis=0))
+    ## Now graph each individual line and run stats
+    # Declare the colors for graphing
+    colors_dict = {"maintain": "forestgreen",
+                   "replace": "darkblue",
+                   "suppress": "firebrick", }
+    # Plot
+    fig, ax = plt.subplots()
+    ax.set_ylim(-0.065, 0.035)
+    ax.axhspan(-0.065, 0, alpha=0.15, color="gray")
+    for i, (oper, results) in enumerate(results_dict.items()):
+        if oper == "maintain":
+            continue
+
+        results = np.array(results)
+        # subtract maintain from vals
+        results -= np.asarray(results_dict["maintain"])
+        # Test significance
+        pvals, sigs = permtest_1d(results, tail=-1)
+        # find the mean and standard error
+        res_mean = results.mean(axis=0)
+        res_sem = sem(results, axis=0)
+        # plot
+        ax.fill_between(np.arange(results.shape[-1]),
+                        res_mean - res_sem,
+                        res_mean + res_sem,
+                        label=oper,
+                        color=colors_dict[oper])
+        # plot the significance
+        ax.plot(sigs, [0.024 + 0.003 * i] * len(sigs), color=colors_dict[oper], linewidth=4)
+    plt.axvline(params["timesteps_per_phase"] + 1, color="k", alpha=0.5, linestyle="--")
+    plt.axvline(params["timesteps_per_phase"] * 2 + 1, color="k", alpha=0.5, linestyle="--")
+    plt.ylabel("RSA\n(removal - maintain)")
+    plt.title("Trajectory for removal of an item [item]")
+    plt.show()
+    return None
+
+
+def calculate_proactive_interference():
+    pass
+
+
+exp_list = simulate_full_experiment(params=mem_params,
+                                    n_participants=20,
+                                    n_jobs=10)
+
+# Graph 4a: Timecourse for neural decoding of a WM item
+results_arr = timecourse_cat_decoding(exp_list=exp_list,
+                                      params=mem_params, )
+# Graph 4b[i]: Trajectory for removal of an item from WM (Category)
+graph_operDiff_catDecode(exp_list=exp_list,
+                         params=mem_params, )
+# Graph 4b[ii]: Trajectory for removal of an item from WM (Item)
+graph_operDiff_itemRSA(exp_list=exp_list,
+                       params=mem_params,
+                       fisher=True,
+                       layers=["visual","verbal"])

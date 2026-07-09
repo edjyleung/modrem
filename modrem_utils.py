@@ -36,7 +36,7 @@ class Modrem_Exp(object):
         "operations": ["maintain", "replace", "suppress"],
         "num_loc_repeats": 5,
         "num_main_trials": 270,
-        "timesteps_per_phase": 10,
+        "timesteps_per_phase": 15,
         "trial_reset": True,
         # Model design
         "vec_len": 10,
@@ -44,12 +44,12 @@ class Modrem_Exp(object):
         # "main_layers": ["visual", "verbal"],
         "clf_layers": ["visual"],
         "ic_ratio": 1,    # item vs category ratio
-        "em_ratio": 1,    # external vs memory ratio
-        "beta": 0.65,
-        "tau_style": "linear",
+        "em_ratio": 0.9,    # external vs memory ratio
+        "beta": 0.99,
+        "tau_style": "exp",
         "tau": 8,
-        "post_tau_style": "exp",  # ["exp", "power", "linear"]
-        "post_tau": 8,
+        "post_tau_style": "linear",  # ["exp", "power", "linear"]
+        "post_tau": np.nan,
         "mem_source": "combined",
         "snr": 5,    # signal to noise ratio (not implemented)
         "echo_weights": {
@@ -63,7 +63,7 @@ class Modrem_Exp(object):
 
     plot_colors = ["orange", "blue", "purple"]
 
-    def __init__(self, params=None, seed=None):
+    def __init__(self, params=None, seed=None, verbose=False):
         self.params = self.default_params | (params or {})
         # initiate a Memories and a Representations object for storage
         self.memories = Memories()
@@ -85,8 +85,12 @@ class Modrem_Exp(object):
                                                 representations=self.representations,
                                                 memories=self.memories,
                                                 params=self.params,)
-        #
+        # Initiate an empty list to save trials data
         self.trials_data = []
+        # Also instantiate a placeholder for stim_lists
+        self.stim_df = None
+        # save verbosity
+        self.verbose = verbose
 
     def __repr__(self):
         return f"Modrem_Exp(params={self.params})"
@@ -108,7 +112,8 @@ class Modrem_Exp(object):
         for i, (train_idx, test_idx) in enumerate(cv.split()):
             clf = OneVsRestClassifier(LogisticRegression(penalty="l2", solver="liblinear", C=1))
             accuracies[i] = clf.fit(X[train_idx], y[train_idx]).score(X[test_idx], y[test_idx])
-        print(f"Accuracy of classifier was {np.mean(accuracies)}. Training classifier on all loc")
+        if self.verbose:
+            print(f"Accuracy of classifier was {np.mean(accuracies)}. Training classifier on all loc")
         self.clf = OneVsRestClassifier(LogisticRegression(penalty="l2", solver="liblinear", C=1)).fit(X, y)
         return self.clf
 
@@ -231,9 +236,13 @@ class Modrem_Exp(object):
         self.memories.task_memories = None
 
     def simulate_experiment(self,
-                            stim_df):
+                            stim_df=None):
+        if stim_df is None:
+            assert self.stim_df is not None, "stim_df attribute is none. stim_df must be supplied first"
+        else:
+            self.stim_df = stim_df
         trials_list = []
-        for _, row in stim_df.iterrows():
+        for _, row in self.stim_df.iterrows():
             encode_item = "_".join([row.category, str(row.stim)])
             replace_item = "_".join([row.replace_category, str(row.replace_stim)])
             # Initialize the trial
@@ -278,7 +287,7 @@ class Modrem_Exp(object):
         trial_data = []
         for n in range(2):
             trial_data.append(self.simulate_step(phase="noise",))
-        for phase in ["encode", operation]:
+        for phase in ["encode", operation, "noise"]:
             # if diagnostic:
             #     if operation == "replace":
             #         # print("pushing replacement representation to current state")
@@ -288,6 +297,9 @@ class Modrem_Exp(object):
             #         # print("post state", self.current_state)
             for n in range(self.params["timesteps_per_phase"]):
                 trial_data.append(self.simulate_step(phase=phase,))
+        # # simulate fixation at end of trial
+        # for n in range(int(self.params["timesteps_per_phase"] * 1.5)):
+        #     trial_data.append(self.simulate_step(phase="noise"))
         self.trials_data.append(trial_data)
         return trial_data
 
@@ -439,7 +451,7 @@ class UpdateMechanism(object):
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal"],
+            "memory": {"echo_layers": ["visual"],  # , "verbal"
                        "noise_layers": [],
                        "tau_dilation": 1}
         },
@@ -455,7 +467,7 @@ class UpdateMechanism(object):
                          "verbal": "noise"},
             "memory": {"echo_layers": ["visual", "verbal"],
                        "noise_layers": [],
-                       "tau_dilation": 0.5}
+                       "tau_dilation": 0.75}
         }
     }
     def __init__(self,
