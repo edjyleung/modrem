@@ -11,16 +11,16 @@ mem_params = {  # Experiment design
     "operations": ["maintain", "replace", "suppress", ],  # "noise"
     "num_loc_repeats": 5,
     "num_main_trials": 270,
-    "timesteps_per_phase": 15,
-    "trial_reset": True,
+    "timesteps_per_phase": 10,
+    "trial_reset": False,
     # Model design
     "vec_len": 10,
     "loc_layers": ["visual", "verbal"],
     # "main_layers": ["visual", "verbal"],
     "clf_layers": ["visual"],
     "ic_ratio": 1,  # item vs category ratio
-    "em_ratio": 0.9,  # external vs memory ratio
-    "beta": 0.99,
+    "em_ratio": 0.6,  # external vs memory ratio
+    "beta": 0.75,
     "tau_style": "exp",
     "tau": 8,
     "post_tau_style": "linear",  # ["exp", "power", "linear"]
@@ -32,33 +32,34 @@ mem_params = {  # Experiment design
         "verbal": 1,
     },
     "update_rules": {
+
         "encode": {
             "external": {"visual": "representation",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal"],
+            "memory": {"echo_layers": ["visual",], # "verbal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "replace": {
             "external": {"visual": "noise",
                          "verbal": "representation"},
-            "memory": {"echo_layers": ["visual", "verbal"],
+            "memory": {"echo_layers": ["verbal"], # "visual",
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual"],
+            "memory": {"echo_layers": ["visual",], # "verbal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "suppress": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal"],
+            "memory": {"echo_layers": ["visual",], # "verbal"
                        "noise_layers": [],
-                       "tau_dilation": 0.75}
+                       "tau_dilation": 0.5}
         }
     },
     "init_state": "noise",
@@ -243,10 +244,14 @@ diagnostic = False
 #                                    diagnostic=diagnostic)
 # except Exception as e:
 #     print(f"tau={tau_style}, post_tau={post_tau_style} failed: {e}")
-
+# mem_params["update_rules"]["encode"]["memory"]["echo_layers"] = ["visual"]
+#
+# mem_params["update_rules"]["maintain"]["memory"]["echo_layers"] = ["visual"]
+# mem_params["update_rules"]["suppress"]["memory"]["echo_layers"] = ["visual"]
+# mem_params["update_rules"]["replace"]["memory"]["echo_layers"] = ["verbal"]
 # Use new simulation functions
 exp_list = KE.simulate_full_experiment(params=mem_params,
-                                    n_participants=20,
+                                    n_participants=50,
                                     n_jobs=10)
 
 # Graph 4a: Timecourse for neural decoding of a WM item
@@ -254,12 +259,18 @@ results_arr = KE.timecourse_cat_decoding(exp_list=exp_list,
                                       params=mem_params, )
 # Graph 4b[i]: Trajectory for removal of an item from WM (Category)
 KE.graph_operDiff_catDecode(exp_list=exp_list,
-                         params=mem_params, )
+                            params=mem_params, )
 # Graph 4b[ii]: Trajectory for removal of an item from WM (Item)
 KE.graph_operDiff_itemRSA(exp_list=exp_list,
                           params=mem_params,
                           fisher=True,
                           layers="visual")
+# Graph 5b: WM Operation impact on encoding fidelity
+KE.graph_proactive_interference(exp_list=exp_list,
+                                params=mem_params,
+                                fisher=True,
+                                layers="visual"
+                                )
 
 ####################################################################################################################
 # %% ### Gridsearch through parameters
@@ -296,3 +307,34 @@ KE.graph_operDiff_itemRSA(exp_list=exp_list,
 
 # %% ### Create Kim et al. (2020) graphs
 
+
+x = np.linspace(-6, 6, 1000)
+
+# Normal PDF function
+def normal_pdf(x, mean=0, sd=1):
+    return (1 / (sd * np.sqrt(2 * np.pi))) * np.exp(
+        -0.5 * ((x - mean) / sd) ** 2
+    )
+
+# Parameters
+mean = 0
+sds = [0.5, 2]
+
+# fig, ax = plt.subplots(figsize=(4, 4))
+fig, ax = plt.subplots(figsize=(6, 4))
+colors = ["darkgoldenrod", "sandybrown"]
+for s, sd in enumerate(sds):
+    y = normal_pdf(x, mean=mean, sd=sd)
+    ax.plot(x, y, label=f"{["large", "small"][s]} tau", color=colors[s])
+
+ax.axis("off")
+# ax.spines['top'].set_visible(False)
+# ax.spines['right'].set_visible(False)
+# ax.set_title("Normal distributions with different standard deviations")
+ax.legend(
+    loc="upper right",
+    bbox_to_anchor=(0.42, 1.1)
+)
+plt.savefig("example_tau.png")
+# plt.tight_layout()
+plt.show()

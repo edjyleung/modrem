@@ -296,6 +296,8 @@ class Modrem_Exp(object):
             #         self.current_state[layers_dict["verbal"]] = self.replacement_representation[layers_dict["verbal"]]
             #         # print("post state", self.current_state)
             for n in range(self.params["timesteps_per_phase"]):
+            #     if phase == "noise" and n >= self.params["timesteps_per_phase"] - 2:
+            #         continue
                 trial_data.append(self.simulate_step(phase=phase,))
         # # simulate fixation at end of trial
         # for n in range(int(self.params["timesteps_per_phase"] * 1.5)):
@@ -440,6 +442,13 @@ class UpdateMechanism(object):
                        "noise_layers": ["visual", "verbal"],
                        "tau_dilation": 1},
         },
+        "fixation": {
+            "external": {"visual": "noise",
+                         "verbal": "noise",},
+            "memory": {"echo_layers": ["visual", "verbal"],
+                       "noise_layers": [],
+                       "tau_dilation": 1},
+        },
         "encode": {
             "external": {"visual": "representation",
                          "verbal": "noise"},
@@ -451,21 +460,21 @@ class UpdateMechanism(object):
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual"],  # , "verbal"
+            "memory": {"echo_layers": ["visual"],  # "verbal"
                        "noise_layers": [],
                        "tau_dilation": 1}
         },
         "replace": {
             "external": {"visual": "noise",
                          "verbal": "representation"},
-            "memory": {"echo_layers": ["visual", "verbal"],
+            "memory": {"echo_layers": ["verbal"], # "visual",
                        "noise_layers": [],
                        "tau_dilation": 1}
         },
         "suppress": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal"],
+            "memory": {"echo_layers": ["visual"], # "verbal"
                        "noise_layers": [],
                        "tau_dilation": 0.75}
         }
