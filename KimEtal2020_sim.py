@@ -17,6 +17,19 @@ from sklearn.metrics import roc_auc_score
 
 from modrem_utils import Modrem_Exp, layers_dict
 
+colors = {"maintain": "forestgreen",
+          "suppress": "firebrick",
+          "replace": "darkblue",
+          "replace_new": "cornflowerblue",
+          "replace_old": "darkblue",
+          "enconly": "darkgray",
+          "clear": "darkorange",
+          "noise": "black",
+          # for category
+          "face": "orange",
+          "scene": "blue",
+          "fruit": "green"
+          }
 
 def build_stims_Kim2020neuro(params):
     # initiate all unique conditions
@@ -35,28 +48,42 @@ def build_stims_Kim2020neuro(params):
     assert params["num_loc_items"] % params[
         "num_categories"] == 0, "num loc items are not fully divisible by num categories"
     num_items_per_cat = params["num_loc_items"] // params["num_categories"]
-    num_cat_repeats = num_main_trials // params["num_loc_items"] * 2
+    # assert that there are enough items
+    if params["unique_items"]:
+        cat_reps = (len(params["operations"]) + int("replace" in params["operations"]))
+        assert params["num_loc_items"] / params["num_main_trials"] >= len(params["operations"]) / cat_reps, "there are not enough items for unique_items=True"
+        num_cat_repeats = 1
+    else:
+        num_cat_repeats = num_main_trials // params["num_loc_items"] * 2
+    # initiate the stim list
     stims_dict = {cat: [i for n in range(num_cat_repeats) for i in np.random.permutation(np.arange(num_items_per_cat))]
                   for cat in params["categories"]}
     stims_list = []
     replace_list = []
     for _, r in df.iterrows():
         stims_list.append(stims_dict[r.category].pop())
-        replace_list.append(stims_dict[r.replace_category].pop())
-    df["stim"] = stims_list
-    df["replace_stim"] = replace_list
+        if r.operation == "replace":
+            replace_list.append(stims_dict[r.replace_category].pop())
+        else:
+            replace_list.append(None)
+    df["stim"] = pd.Series(stims_list, dtype="str")
+    df["replace_stim"] = pd.Series(replace_list, dtype="str")
     return df
 
 
-def decode_category(exp, data=None):
+def decode_category(exp, data=None, hrf=None, **kwargs):
     """
     Decodes the category information for each trial for each timepoint using innate clf in exp
+    :param hrf:
     :param exp: Experiment object
     :param data: default=None. Data in shape (n_trials, n_timepoints, n_layers, n_features)
     :return:
     """
     if data is None:
-        data = np.asarray(exp.trials_data)
+        if hrf:
+            data = exp.conv_HRF_trialsdata(**kwargs)
+        else:
+            data = np.asarray(exp.trials_data)
     n_trials = data.shape[0]
     n_timepoints = data.shape[1]
     n_classes = exp.params["num_categories"]
@@ -81,7 +108,7 @@ def summarize_cat_decoding(exp,
                            summary_value="evidence",
                            graph=False):
     """
-
+    Extract the correct category decoding for each trial
     :param exp:
     :param results_dict:
     :param df:
@@ -107,10 +134,6 @@ def summarize_cat_decoding(exp,
     # also initiate the figure
     if graph:
         fig, ax = plt.subplots(figsize=(7, 4))
-    colors = {"maintain": "forestgreen",
-              "suppress": "firebrick",
-              "replace_old": "darkblue",
-              "replace_new": "cornflowerblue"}
     oper_list = []
     # graph each operation
     for o, oper in enumerate(operations):
@@ -137,11 +160,6 @@ def summarize_cat_decoding(exp,
         plt.legend()
         plt.show()
     return {"results": results_arr, "operations": oper_list}
-
-
-def item_RSA(exp, ):
-    pass
-
 
 def simulate_participant(params,
                          diagnostic=False,
@@ -176,7 +194,7 @@ def simulate_participant(params,
             # Initialize the trial
             Exp.initialize_trial(item=encode_item)
 
-            # run the trial
+            # run the trials
             trials_list.append(Exp.simulate_trial(operation=row.operation,
                                                   encode_item=encode_item,
                                                   replace_item=replace_item,
@@ -203,28 +221,43 @@ def simulate_full_experiment(params,
     return exp_list
 
 
+def _summarize_cat_timecourse(exp,
+                              params,
+                              **kwargs,
+                              ):
+    # perform decoding
+    results_dict = decode_category(exp=exp,
+                                   data=None,
+                                   hrf=params["hrf"],
+                                   **kwargs)
+    # extract the correct decoding traces
+    res_dict = summarize_cat_decoding(exp=exp,
+                                      results_dict=results_dict,
+                                      df=exp.stim_df,
+                                      summary_value="evidence",
+                                      graph=False)
+    return res_dict
+
 def timecourse_cat_decoding(exp_list,
-                            params):
+                            params,
+                            n_jobs=-1,
+                            **kwargs,
+                            ):
     """
     Kim et al. (2020) Graph 4a: Timecourse for neural decoding of a WM item
     --Also outputs
     :param exp_list:
     :return: results_arr (array)
     """
-    results = []
-    opers_list = []
-    for e, exp in enumerate(exp_list):
-        results_dict = decode_category(exp=exp,
-                                       data=None)
-
-        res_dict = summarize_cat_decoding(exp=exp,
-                                          results_dict=results_dict,
-                                          df=exp.stim_df,
-                                          summary_value="evidence",
-                                          graph=False)
-
-        results.append(res_dict["results"])
-        opers_list.append(res_dict["operations"])
+    res_dict_list = Parallel(n_jobs=n_jobs)(
+        delayed(_summarize_cat_timecourse)(exp=exp,
+                                           params=params,
+                                           **kwargs,
+                                           )
+        for exp in tqdm(exp_list)
+    )
+    results = [r["results"] for r in res_dict_list]
+    opers_list = [r["operations"] for r in res_dict_list]
 
     ####
     # convert results list to array
@@ -234,13 +267,6 @@ def timecourse_cat_decoding(exp_list,
     if operations.ndim > 1:
         raise ValueError("There are more than one unique operations order:\n", operations)
     # Now graph it
-    colors = {"maintain": "forestgreen",
-              "suppress": "firebrick",
-              "replace_new": "cornflowerblue",
-              "replace_old": "darkblue",
-              "enconly": "darkgray",
-              "noise": "black",
-              }
     fig, ax = plt.subplots()
     x = np.arange(1, results_arr.shape[1] + 1)
     y_mean = results_arr.mean(axis=0)
@@ -278,6 +304,8 @@ def permtest_1d(X,
 def graph_operDiff_catDecode(exp_list,
                              params,
                              ylim=None,
+                             n_jobs=-1,
+                             **kwargs,
                              ):
     """
     Kim et al. (2020) Graph 4b[i]: Trajectory for removal of an item [category]
@@ -285,33 +313,32 @@ def graph_operDiff_catDecode(exp_list,
     :param params:
     :return: None
     """
-    results = []
-    opers_list = []
-    for e, exp in enumerate(exp_list):
-        results_dict = decode_category(exp=exp,
-                                       data=None)
 
-        res_dict = summarize_cat_decoding(exp=exp,
-                                          results_dict=results_dict,
-                                          df=exp.stim_df,
-                                          summary_value="evidence",
-                                          graph=False)
-
-        results.append(res_dict["results"])
-        opers_list.append(res_dict["operations"])
-
+    res_dict_list = Parallel(n_jobs=n_jobs)(
+        delayed(_summarize_cat_timecourse)(exp=exp,
+                                           params=params,
+                                           **kwargs,
+                                           )
+        for exp in tqdm(exp_list)
+    )
+    results = [r["results"] for r in res_dict_list]
+    opers_list = [r["operations"] for r in res_dict_list]
     # Save the ind numbers
-    main_ind = np.unique(opers_list, axis=0).squeeze().tolist().index("maintain")
-    supp_ind = np.unique(opers_list, axis=0).squeeze().tolist().index("suppress")
-    rep_ind = np.unique(opers_list, axis=0).squeeze().tolist().index("replace_old")
+    inds_dict = {i: o for o, i in enumerate(np.unique(opers_list, axis=0).squeeze().tolist())}
+
     # Subtract each trace from maintain
     results_arr = np.asarray(results)
     # Perform subtractions
-    diff_dict = {"replace": results_arr[..., rep_ind] - results_arr[..., main_ind],
-                 "suppress": results_arr[..., supp_ind] - results_arr[..., main_ind],
-                 }
-    colors_dict = {"replace": "darkblue",
-                   "suppress": "firebrick", }
+    diff_dict = {
+        op: results_arr[..., op_ind] - results_arr[..., inds_dict["maintain"]]
+        for op, op_ind in inds_dict.items() if op not in ["maintain", "replace_new"]
+    }
+        # "replace": results_arr[..., rep_ind] - results_arr[..., main_ind],
+        #          "suppress": results_arr[..., supp_ind] - results_arr[..., main_ind],
+        #          }
+    # Rename 'replace_old' to 'replace'
+    if "replace_old" in diff_dict.keys():
+        diff_dict["replace"] = diff_dict.pop("replace_old")
     # plot these traces
     fig, ax = plt.subplots(figsize=(10, 4))
     ylim = ylim or (-0.5, 0.13)
@@ -323,9 +350,9 @@ def graph_operDiff_catDecode(exp_list,
         # Get mean and sem
         means = res.mean(axis=0)
         sems = sem(res, axis=0)
-        ax.fill_between(np.arange(res.shape[1]), means + sems, means - sems, color=colors_dict[oper], label=oper)
+        ax.fill_between(np.arange(res.shape[1]), means + sems, means - sems, color=colors[oper], label=oper)
         # plot the sigs
-        ax.plot(sigs, [0.07 + 0.02 * i] * len(sigs), color=colors_dict[oper], linewidth=4)
+        ax.plot(sigs, [0.07 + 0.02 * i] * len(sigs), color=colors[oper], linewidth=4)
         # for s in sigs:
         #     plt.text(s, 0.09 + 0.01 * i , "*", )
     plt.axvline(params["timesteps_per_phase"] + 1, color="k", alpha=0.5, linestyle="--")
@@ -337,19 +364,38 @@ def graph_operDiff_catDecode(exp_list,
 
 
 def calculate_item_RSA(exp,
+                       params,
+                       summarize,
                        similarity_coefficient="pearson",
+                       representation_level="item",
                        fisher=True,
                        layers=None,
                        **kwargs):
+    """
+    Calculate item RSA for each trial based on the veridical
+    :param representation_level: allows control for which representation (combined, item) to compare with
+    :param exp:
+    :param similarity_coefficient:
+    :param fisher: (bool) whether to return the bound similarity or unbound scores
+    :param layers: which layers to compute similarity
+    :param kwargs:
+    :return: returns the similarity score array in dimensions (n_trials, n_timepoints)
+    """
+    ## start with getting the veridical items for each trial
     # Obtain the encoded item for each trial
     item_reps_list = []
     for _, r in exp.stim_df.iterrows():
         item_reps_list.append(
-            exp.representations.query_item_representation(f"{r.category}_{r.stim}")
+            exp.representations.representations[representation_level][(f"{r.category}_{r.stim}")]
         )
     item_reps_arr = np.array(item_reps_list)
+    ## Then grab the representations for each trial
     # Obtain trials data
-    trials_data_arr = np.asarray(exp.trials_data)
+    if params["hrf"]:
+        trials_data_arr = exp.conv_HRF_trialsdata(**kwargs)
+    else:
+        trials_data_arr = np.asarray(exp.trials_data)
+
     # Convert layers to list if it is a str
     if type(layers) is str:
         layers = [layers]
@@ -379,45 +425,61 @@ def calculate_item_RSA(exp,
         corr = layered_similarity.mean(axis=-1)
     if fisher:
         corr = np.arctanh(corr)
-    return corr
-
-
-def graph_operDiff_itemRSA(exp_list,
-                           params,
-                           ylim=None,
-                           **kwargs):
-    """
-    Graph 4b[i]: Trajectory for removal of an item [category]
-    :param ylim:
-    :param exp_list:
-    :param params:
-    :param kwargs: **Passed to calculate_item_RSA: fisher default=True (perform fisher Z transform on output),
-                                                   layers default: list or str = None (layers to calculate RSA)
-
-    :return:
-    """
-
-    results_dict = {op: [] for op in params["operations"]}
-
-    # Loop through each list
-    for e, exp in enumerate(exp_list):
-        # calculate representational similarity
-        corr = calculate_item_RSA(exp,
-                                  similarity_coefficient="pearson",
-                                  **kwargs)
+    # return summary or raw corr
+    if summarize:
+        results_dict = {}
         # Index and average across trials within operation
         for oper in params["operations"]:
             # subselect the trial indices
             oper_inds = np.where(exp.stim_df.operation == oper)[0]
-            results_dict[oper].append(corr[oper_inds].mean(axis=0))
+            results_dict[oper] = corr[oper_inds].mean(axis=0)
+        return results_dict
+    else:
+        return corr
+
+
+
+
+def graph_operDiff_itemRSA(exp_list,
+                           params,
+                           similarity_coefficient="pearson",
+                           fisher=True,
+                           layers="visual",
+                           n_jobs=-1,
+                           ylim=None,
+                           **kwargs):
+    """
+    Graph 4b[ii]: Trajectory for removal of an item [category]
+    :param exp_list:
+    :param params:
+    :param similarity_coefficient:
+    :param fisher:
+    :param layers:
+    :param n_jobs:
+    :param ylim:
+    :param kwargs:  **Passed to calculate_item_RSA: fisher default=True (perform fisher Z transform on output),
+                                                   layers default: list or str = None (layers to calculate RSA)
+    :return: None
+    """
+
+    results_dict = {op: [] for op in params["operations"]}
+    res_list = Parallel(n_jobs=n_jobs)(
+        delayed(calculate_item_RSA)(exp=exp,
+                                    params=params,
+                                    summarize=True,
+                                    similarity_coefficient=similarity_coefficient,
+                                    fisher=fisher,
+                                    layers=layers,
+                                    **kwargs) for exp in tqdm(exp_list)
+    )
+    for res in res_list:
+        for k, val in res.items():
+            results_dict[k].append(val)
+
     ## Now graph each individual line and run stats
-    # Declare the colors for graphing
-    colors_dict = {"maintain": "forestgreen",
-                   "replace": "darkblue",
-                   "suppress": "firebrick", }
     # Plot
     fig, ax = plt.subplots(figsize=(10, 4))
-    ylim = ylim or (-0.065, 0.035)
+    ylim = ylim or (-0.065, 0.045)
     ax.set_ylim(ylim)
     ax.axhspan(ylim[0], 0, alpha=0.15, color="gray")
     for i, (oper, results) in enumerate(results_dict.items()):
@@ -437,9 +499,9 @@ def graph_operDiff_itemRSA(exp_list,
                         res_mean - res_sem,
                         res_mean + res_sem,
                         label=oper,
-                        color=colors_dict[oper])
+                        color=colors[oper])
         # plot the significance
-        ax.plot(sigs, [0.024 + 0.003 * i] * len(sigs), color=colors_dict[oper], linewidth=4)
+        ax.plot(sigs, [0.03 + 0.01 * i] * len(sigs), color=colors[oper], linewidth=4)
     plt.axvline(params["timesteps_per_phase"] + 1, color="k", alpha=0.5, linestyle="--")
     plt.axvline(params["timesteps_per_phase"] * 2 + 1, color="k", alpha=0.5, linestyle="--")
     plt.ylabel("RSA\n(removal - maintain)")
@@ -447,10 +509,80 @@ def graph_operDiff_itemRSA(exp_list,
     plt.show()
     return None
 
+def calculate_proactive_interference(sub,
+                                     exp,
+                                     params,
+                                     exclude_rep_sameCat=True,
+                                     timepoints="all",
+                                     similarity_coefficient="pearson",
+                                     hrf=False,
+                                     **kwargs):
+    """
+    Calculates the encoding fidelity of an item on the n+1 trial following encoding category and operation on trial n
+    :param sub: saved into participant column
+    :param exp: Modrem_Exp object containing completed experiment
+    :param params: dictionary containing all parameters of experiment
+    :param exclude_rep_sameCat:
+    :param timepoints: timepoints after ITI to average over
+    :param similarity_coefficient: how similarity is measured: defined in calculate_item_RSA function
+    :param kwargs:
+    :return: dataframe containing encoding fidelity of each trial
+    """
+    # calculate representational similarity
+    corr = calculate_item_RSA(exp=exp,
+                              params=params,
+                              summarize=False,
+                              similarity_coefficient=similarity_coefficient,
+                              hrf=hrf,
+                              **kwargs)
+    # Find the trials where the next trial is same/diff category
+    cats = exp.stim_df["category"]
+    curr_cats = cats.iloc[:-1].to_numpy()
+    next_cats = cats.iloc[1:].to_numpy()
+    # Index on the n+1 trials (next_trials): add 1 to all inds
+    same_inds = np.where(curr_cats == next_cats)[0] + 1
+    diff_inds = np.where(curr_cats != next_cats)[0] + 1
+    # initiate storage
+    df = pd.DataFrame()
+    # Index and average across trials within operation
+    for oper in params["operations"]:
+        # subselect the trial indices, again indexing on n+1
+        oper_inds = np.where(exp.stim_df.operation == oper)[0] + 1
+        same_oper_inds = np.intersect1d(same_inds, oper_inds)
+        diff_oper_inds = np.intersect1d(diff_inds, oper_inds)
+        if exclude_rep_sameCat and oper == "replace":
+            # exclude trials where the replaced category is the same as the n+1 category
+            rep_curr_cats = exp.stim_df["replace_category"].iloc[:-1].to_numpy()
+            rep_diff_inds = np.where(rep_curr_cats != next_cats)[0] + 1
+            diff_oper_inds = np.intersect1d(diff_oper_inds, rep_diff_inds)
+        timepoints = params["timesteps_per_phase"] if timepoints == "all" else timepoints
+        # calculate RSA value for last timepoint in the encoding period
+        s_df = pd.DataFrame({"participant": sub,
+                             "operation": oper,
+                             "similarity": corr[same_oper_inds, params["iti"]: params["iti"] + timepoints].mean(
+                                 axis=-1),
+                             "category_repeat": "same",
+                             }
+                            )
+        d_df = pd.DataFrame({"participant": sub,
+                             "operation": oper,
+                             "similarity": corr[diff_oper_inds, params["iti"]: params["iti"] + timepoints].mean(
+                                 axis=-1),
+                             "category_repeat": "diff",
+                             }
+                            )
+        df = pd.concat([df, s_df, d_df], ignore_index=True)
+
+    return df
 
 def graph_proactive_interference(exp_list,
                                  params,
                                  plot_delta=True,
+                                 balance=True,
+                                 hrf=False,
+                                 exclude_rep_sameCat=True,
+                                 timepoints="all",
+                                 n_jobs=-1,
                                  **kwargs):
     """
     Graph 4b[i]: Trajectory for removal of an item [category]
@@ -461,67 +593,64 @@ def graph_proactive_interference(exp_list,
                                                    layers default: list or str = None (layers to calculate RSA)
     :return:
     """
+    # parallelize item rsa calculation
+    results_list = Parallel(n_jobs=n_jobs)(
+        delayed(calculate_proactive_interference)(
+            sub=sub,
+            exp=exp,
+            params=params,
+            exclude_rep_sameCat=exclude_rep_sameCat,
+            timepoints=timepoints,
+            hrf=hrf,
+            **kwargs) for sub, exp in enumerate(tqdm(exp_list))
+    )
 
-    results_df = pd.DataFrame()
-
-    # Loop through each list
-    for e, exp in enumerate(exp_list):
-        # calculate representational similarity
-        corr = calculate_item_RSA(exp,
-                                  similarity_coefficient="pearson",
-                                  **kwargs)
-        # Find the trials where the next trial is same/diff category
-        cats = exp.stim_df["category"]
-        curr_cats = cats.iloc[:-1].to_numpy()
-        next_cats = cats.iloc[1:].to_numpy()
-        same_inds = np.where(curr_cats == next_cats)[0]
-        diff_inds = np.where(curr_cats != next_cats)[0]
-        # Index and average across trials within operation
-        for oper in params["operations"]:
-            # subselect the trial indices
-            oper_inds = np.where(exp.stim_df.operation == oper)[0]
-            same_oper_inds = np.intersect1d(same_inds, oper_inds) + 1
-            diff_oper_inds = np.intersect1d(diff_inds, oper_inds) + 1
-            # calculate RSA value for last timepoint in the encoding period
-            t_df = pd.DataFrame(
-                {
-                    "participant": e,
-                    "operation": oper,
-                    "same": corr[same_oper_inds, params["timesteps_per_phase"] + 1].mean(),
-                    "diff": corr[diff_oper_inds, params["timesteps_per_phase"] + 1].mean(),
-                },
-                index=[0]
+    raw_df = pd.concat(results_list, ignore_index=True)
+    # balance the number of values to be aggregated
+    if balance:
+        condition_cols = ["participant", "operation", "category_repeat"]
+        # counts_df = raw_df.groupby(["participant", "operation", "category_repeat"]).count().reset_index()
+        bal_list = []
+        for p in raw_df.participant.unique():
+            p_df = raw_df[raw_df.participant == p]
+            # take the min number
+            min_occurence = p_df.groupby(condition_cols).size().min()
+            bal_list.append(
+                p_df.groupby(condition_cols).sample(n=min_occurence,
+                                                    replace=False)
             )
-            results_df = pd.concat([results_df, t_df], ignore_index=True)
+        raw_df = pd.concat(bal_list, ignore_index=True)
+    ## Aggregate values
+    results_df = raw_df.groupby(condition_cols).mean().reset_index()
     # calculate the delta values
-    results_df["delta"] = results_df["same"] - results_df["diff"]
-    # Declare the colors for graphing
-    colors_dict = {"maintain": "forestgreen",
-                   "replace": "darkblue",
-                   "suppress": "firebrick", }
-
-    results_long = results_df.melt(
+    delta_df = results_df.pivot(
+        index=["participant", "operation"],
+        columns="category_repeat",
+        values="similarity"
+    )
+    delta_df["delta"] = delta_df["same"] - delta_df["diff"]
+    delta_df = delta_df.reset_index().melt(
         id_vars=["participant", "operation"],
         value_vars=["same", "diff", "delta"],
-        var_name="n+1_condition",
-        value_name="value"
+        var_name="category_repeat",
+        value_name="similarity",
     )
 
     if plot_delta:
-        sns.barplot(data=results_df,
+        sns.barplot(data=delta_df[delta_df.category_repeat == "delta"],
                     x="operation",
-                    y="delta",
+                    y="similarity",
                     hue="operation",
                     errorbar="se",
-                    palette=colors_dict,
+                    palette=colors,
                     )
         plt.ylabel("Encoding fidelity (same - different)")
         # plt.ylim(-0.25, 0.25)
     else:
-        sns.barplot(data=results_long,
+        sns.barplot(data=delta_df[delta_df.category_repeat != "delta"],
                     x="operation",
-                    y="value",
-                    hue="n+1_condition",
+                    y="similarity",
+                    hue="category_repeat",
                     errorbar="se",
                     )
     plt.show()
@@ -543,3 +672,60 @@ def graph_proactive_interference(exp_list,
     #                        params=mem_params,
     #                        fisher=True,
     #                        layers=["visual","verbal"])
+
+
+########################################################################################################################
+# Run behavioral responses
+def _run_memory_test(exp,
+                     mem_type,
+                     support_layer="all",
+                     tau=1,
+                     ):
+    # run the test
+    support_dict = exp.behavior.run_memory_test(stim_df=exp.stim_df,
+                                                mem_type=mem_type,
+                                                support_layer=support_layer,
+                                                memories=None,
+                                                tau=tau, )
+    return pd.DataFrame([{"operation": oper,
+                          "category": cat,
+                          "support": sup, }
+                         for oper, features in support_dict.items()
+                         for cat, supports in features.items()
+                         for sup in supports]
+                        )
+
+
+def summarize_memory_test(exp_list,
+                          mem_type,
+                          support_layer="all",
+                          split_category=False,
+                          tau=1,
+                          savefig: str = None,
+                          ):
+    results_df = pd.DataFrame()
+    for i, exp in enumerate(exp_list):
+        t_df = _run_memory_test(exp,
+                                mem_type,
+                                support_layer=support_layer,
+                                tau=tau)
+        results_df = pd.concat([results_df, t_df], ignore_index=True)
+    # plot
+    plt.figure(figsize=(4, 6))
+    hue = "category" if split_category else "operation"
+    bar = sns.barplot(data=results_df,
+                      x="operation",
+                      y="support",
+                      hue=hue,
+                      palette=colors,
+                      errorbar="se",)
+    plt.title(f"support layer:{support_layer}, mem_type:{mem_type}, tau:{tau}")
+    plt.ylabel("Support")
+    plt.xlabel("")
+    if savefig is not None:
+        plt.savefig(savefig)
+    plt.show()
+    return results_df
+
+
+

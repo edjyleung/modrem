@@ -1,42 +1,43 @@
 import numpy as np
 from modrem_utils import Modrem_Exp
 import matplotlib.pyplot as plt
-import KimEtal2020_sim as KE
+import KimEtal2020_sim as ke
 
 # %%
 mem_params = {  # Experiment design
-    "num_loc_items": 54,
+    "num_loc_items": 540,
     "num_categories": 3,
     "categories": ["face", "scene", "fruit"],
-    "operations": ["maintain", "replace", "suppress", ],  # "noise"
+    "operations": ["maintain", "replace", "suppress", "clear"],  # "noise"
     "num_loc_repeats": 5,
-    "num_main_trials": 270,
+    "num_main_trials": 360,
     "timesteps_per_phase": 10,
+    "iti": 2,
     "trial_reset": False,
     # Model design
     "vec_len": 10,
     "loc_layers": ["visual", "verbal"],
     # "main_layers": ["visual", "verbal"],
     "clf_layers": ["visual"],
-    "ic_ratio": 1,  # item vs category ratio
-    "em_ratio": 0.6,  # external vs memory ratio
+    "ic_ratio": 1,    # item vs category ratio
+    "em_ratio": 0.6,    # external vs memory ratio
     "beta": 0.75,
     "tau_style": "exp",
     "tau": 8,
-    "post_tau_style": "linear",  # ["exp", "power", "linear"]
+    "post_tau_style": "linear",    # ["exp", "power", "linear"]
     "post_tau": np.nan,
     "mem_source": "combined",
-    "snr": 5,  # signal to noise ratio (not implemented)
+    "snr": 5,    # signal-to-noise ratio (not implemented)
     "echo_weights": {
         "visual": 1,
         "verbal": 1,
-    },
+    },    # allows for
     "update_rules": {
 
         "encode": {
             "external": {"visual": "representation",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual",], # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal"], # "verbal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
@@ -50,26 +51,55 @@ mem_params = {  # Experiment design
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual",], # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal"], # "verbal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "suppress": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual",], # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal"], # "verbal"
                        "noise_layers": [],
-                       "tau_dilation": 0.5}
-        }
+                       "tau_dilation": 0.3}
+        },
+        "clear": {
+            "external": {"visual": "noise",
+                         "verbal": "noise"},
+            "memory": {"echo_layers": [],  # "verbal"
+                       "noise_layers": ["visual", "verbal"],
+                       "tau_dilation": 1},
+        },
     },
     "init_state": "noise",
     "activation_intensity": False,
+    "hrf": True,
+    "unique_items": True,
 }
 
 
+exp_list = ke.simulate_full_experiment(params=mem_params,
+                                       n_participants=30,
+                                       n_jobs=10)
 
 
-
+# # Graph 4a: Timecourse for neural decoding of a WM item
+# results_arr = ke.timecourse_cat_decoding(exp_list=exp_list,
+#                                          params=mem_params,
+#                                          shifted=True,
+#                                          oversampling=20,
+#                                          tr=0.6,
+#                                          shift_delay=4.6,
+#                                          )
+ke.graph_operDiff_itemRSA(exp_list=exp_list,
+                          params=mem_params,
+                          fisher=True,
+                          layers="visual",
+                          shifted=True,
+                          oversampling=20,
+                          tr=0.6,
+                          shift_delay=4.6,
+                          ylim=(-0.36,0.07)
+                          )
 
 ####################################################################################################################
 # %% ### Simulate a single trial
@@ -225,7 +255,7 @@ plt.title(f"Probas tau:{mem_params['post_tau']}")
 plt.show()
 
 #%% ### Run a single participant
-exp = KE.simulate_participant(params=mem_params,
+exp = ke.simulate_participant(params=mem_params,
                               diagnostic=False)
 
 # %% ### Run a single experiment
@@ -250,27 +280,79 @@ diagnostic = False
 # mem_params["update_rules"]["suppress"]["memory"]["echo_layers"] = ["visual"]
 # mem_params["update_rules"]["replace"]["memory"]["echo_layers"] = ["verbal"]
 # Use new simulation functions
-exp_list = KE.simulate_full_experiment(params=mem_params,
-                                    n_participants=50,
-                                    n_jobs=10)
+exp_list = ke.simulate_full_experiment(params=mem_params,
+                                       n_participants=30,
+                                       n_jobs=10)
+
 
 # Graph 4a: Timecourse for neural decoding of a WM item
-results_arr = KE.timecourse_cat_decoding(exp_list=exp_list,
-                                      params=mem_params, )
+results_arr = ke.timecourse_cat_decoding(exp_list=exp_list,
+                                         params=mem_params,
+                                         shifted=True,
+                                         oversampling=20,
+                                         tr=0.6,
+                                         shift_delay=4.6,
+                                         )
 # Graph 4b[i]: Trajectory for removal of an item from WM (Category)
-KE.graph_operDiff_catDecode(exp_list=exp_list,
-                            params=mem_params, )
+ke.graph_operDiff_catDecode(exp_list=exp_list,
+                            params=mem_params,
+                            shifted=True,
+                            oversampling=20,
+                            tr=0.6,
+                            shift_delay=4.6,
+                            ylim=(-0.6, 0.15)
+                            )
 # Graph 4b[ii]: Trajectory for removal of an item from WM (Item)
-KE.graph_operDiff_itemRSA(exp_list=exp_list,
+ke.graph_operDiff_itemRSA(exp_list=exp_list,
                           params=mem_params,
                           fisher=True,
-                          layers="visual")
+                          layers="visual",
+                          shifted=True,
+                          oversampling=20,
+                          tr=0.6,
+                          shift_delay=4.6,
+                          ylim=(-0.33,0.04)
+                          )
 # Graph 5b: WM Operation impact on encoding fidelity
-KE.graph_proactive_interference(exp_list=exp_list,
+ke.graph_proactive_interference(exp_list=exp_list,
                                 params=mem_params,
+                                # similarity_coefficient="pearson",
                                 fisher=True,
-                                layers="visual"
+                                layers="visual",
+                                exclude_rep_sameCat=True,
+                                timepoints="all",
+                                n_jobs=-1,
                                 )
+# Memory test
+beh_results = ke.summarize_memory_test(exp_list=exp_list,
+                                       mem_type="ltm",
+                                       support_layer="visual",
+                                       tau=40)
+
+for i in range(3):
+    exp_list = ke.simulate_full_experiment(params=mem_params,
+                                           n_participants=300,
+                                           n_jobs=10)
+    # Graph 5b: WM Operation impact on encoding fidelity
+    ke.graph_proactive_interference(exp_list=exp_list,
+                                    params=mem_params,
+                                    fisher=True,
+                                    balance=True,
+                                    layers="visual",
+                                    exclude_rep_sameCat=True,
+                                    timepoints="all",
+                                    n_jobs=-1,
+                                    plot_delta=True,
+                                    )
+
+    for layer in ["visual", "all"]:
+        for memtype in ["ltm", "disc_wm", "cum_wm"]:
+            beh_results = ke.summarize_memory_test(exp_list=exp_list,
+                                                   mem_type=memtype,
+                                                   support_layer=layer,
+                                                   tau=12,
+                                                   savefig=f"figures/{memtype}_{layer}_{i}.png", )
+
 
 ####################################################################################################################
 # %% ### Gridsearch through parameters

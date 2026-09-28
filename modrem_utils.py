@@ -7,6 +7,7 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import PredefinedSplit
 from sklearn.preprocessing import LabelEncoder
 
+from scipy.stats import gamma
 from scipy.special import softmax
 
 layers_dict = {"visual": 0,
@@ -35,23 +36,25 @@ class Modrem_Exp(object):
         "categories": ["face", "scene", "fruit"],
         "operations": ["maintain", "replace", "suppress"],
         "num_loc_repeats": 5,
-        "num_main_trials": 270,
-        "timesteps_per_phase": 15,
-        "trial_reset": True,
+        "num_main_trials": 360,
+        "timesteps_per_phase": 10,
+        "iti": 2,
+        "trial_reset": False,
+        "unique_items": False,
         # Model design
         "vec_len": 10,
         "loc_layers": ["visual", "verbal"],
         # "main_layers": ["visual", "verbal"],
         "clf_layers": ["visual"],
         "ic_ratio": 1,    # item vs category ratio
-        "em_ratio": 0.9,    # external vs memory ratio
-        "beta": 0.99,
+        "em_ratio": 0.6,    # external vs memory ratio
+        "beta": 0.75,
         "tau_style": "exp",
         "tau": 8,
-        "post_tau_style": "linear",  # ["exp", "power", "linear"]
+        "post_tau_style": "linear",    # ["exp", "power", "linear"]
         "post_tau": np.nan,
         "mem_source": "combined",
-        "snr": 5,    # signal to noise ratio (not implemented)
+        "snr": 5,    # signal-to-noise ratio (not implemented)
         "echo_weights": {
             "visual": 1,
             "verbal": 1,
@@ -59,6 +62,7 @@ class Modrem_Exp(object):
         "update_rules": {},
         "init_state": "noise",
         "activation_intensity": False,
+        "hrf": True,
     }
 
     plot_colors = ["orange", "blue", "purple"]
@@ -89,6 +93,11 @@ class Modrem_Exp(object):
         self.trials_data = []
         # Also instantiate a placeholder for stim_lists
         self.stim_df = None
+        # also save a behavioral output mechanism
+        self.behavior = BehavioralOutputMechanism(rng=self.rng,
+                                                  representations=self.representations,
+                                                  memories=self.memories,
+                                                  params=self.params,)
         # save verbosity
         self.verbose = verbose
 
@@ -117,13 +126,106 @@ class Modrem_Exp(object):
         self.clf = OneVsRestClassifier(LogisticRegression(penalty="l2", solver="liblinear", C=1)).fit(X, y)
         return self.clf
 
-    def classify_timepoints(self):
+    def classify_timepoints(self, current_trial=None):
+        if current_trial is None:
+            current_trial = self.current_trial
         clf = self.clf
         probas = np.zeros((len(self.params["categories"]),
-                           len(self.current_trial)))
-        for t, t_step in enumerate(self.current_trial):
+                           len(current_trial)))
+        for t, t_step in enumerate(current_trial):
             probas[:, t] = clf.predict_proba(t_step[self.get_clf_layer_inds()].reshape(1, -1))
         return probas
+
+    def conv_HRF_trialsdata(self, **kwargs):
+        trials_data = np.asarray(self.trials_data, dtype=float)
+
+        conv_trials_data = np.empty((trials_data.shape))
+        for trial_idx in range(trials_data.shape[0]):
+            # The trial slice has shape:
+            # (n_timepoints, n_layers, n_features)
+            conv_trials_data[trial_idx] = self.convolve_with_hrf(signal=trials_data[trial_idx],
+                                                                 **kwargs
+                                                                 )
+        return conv_trials_data
+
+    def convolve_with_hrf(self,
+                          signal,
+                          tr=0.4,
+                          response_delay=6,
+                          undershoot_delay=12,
+                          response_scale=1,
+                          undershoot_scale=0.035,
+                          oversampling=100,
+                          hrf_duration=28,
+                          shifted=True,
+                          shift_delay=4,
+                          **kwargs
+                          ):
+        """
+        Convolve a neural/event time series with a canonical double-gamma HRF.
+        Drawn from Brainak.org: (Default values are based on Glover, 1999 and
+                                    Walvaert, Durnez, Moerkerke, Verdoolaege and Rosseel, 2011)
+        :param signal: array-like
+            Neural activity or event amplitudes sampled once per TR.
+
+        :param tr: float
+            Repetition time in seconds.
+        :param response_delay:
+        :param undershoot_delay:
+        :param response_scale:
+        :param undershoot_scale:
+        :param oversampling: int
+            Number of upsampled points per original time point.
+            (Temporal oversampling factor used to model the HRF.)
+
+        :param hrf_duration: float
+            HRF duration in seconds.
+        :param shifted:
+        :param raw:
+        :return: convolved : np.ndarray
+            HRF-convolved signal, sampled at the original TR and with the
+            same length as the input.
+        """
+        signal = np.asarray(signal)
+        # save the original shape
+        n_time = signal.shape[0]
+        original_shape = signal.shape
+        # Combine all non-time dimensions into one feature dimension:
+        # (time, dim_1, dim_2, ...) -> (time, n_features)
+        signal_2d = signal.reshape(n_time, -1)
+
+        dt = tr / oversampling
+        hrf_time = np.arange(0, hrf_duration, dt)
+
+        # Canonical double-gamma HRF:
+        hrf = (gamma.pdf(hrf_time, a=response_delay) * response_scale
+               - gamma.pdf(hrf_time, a=undershoot_delay) * undershoot_scale)
+        # rescale back to unit
+        hrf /= hrf.sum()
+
+
+        # Temporarily upsample every feature simultaneously.
+        upsampled_signal = np.repeat(signal_2d,
+                                     oversampling,
+                                     axis=0
+                                     )
+        # Shift hrf function
+        shift = int(shift_delay / dt) if shifted else 0
+
+        # Convolve
+        convolved_2d = np.empty_like(upsampled_signal)
+        for feature_idx in range(signal_2d.shape[1]):
+            full_convolution = np.convolve(upsampled_signal[:, feature_idx],
+                                           hrf,
+                                           mode="full",
+                                           )
+            # Cut off excess signal at the end
+            convolved_2d[:, feature_idx] = full_convolution[shift: shift + len(upsampled_signal)]
+        # Downsample back to original temporal resolution
+        convolved_2d = convolved_2d[::oversampling, :]
+        # Restore the input shape.
+        convolved = convolved_2d.reshape(original_shape)
+        return convolved
 
     def _create_item_codes(self,
                           vec_len,
@@ -282,10 +384,13 @@ class Modrem_Exp(object):
             self.reset_current_trial()
         # Initialize trial and replacement
         self.initialize_trial(item=encode_item)
-        self.initialize_replacement(item=replace_item)
+        if operation == "replace":
+            self.initialize_replacement(item=replace_item)
+        else:
+            self.replacement_representation, self.replacement_item_name = None, None
         # Initiate trial data list
         trial_data = []
-        for n in range(2):
+        for n in range(self.params["iti"]):
             trial_data.append(self.simulate_step(phase="noise",))
         for phase in ["encode", operation, "noise"]:
             # if diagnostic:
@@ -304,7 +409,6 @@ class Modrem_Exp(object):
         #     trial_data.append(self.simulate_step(phase="noise"))
         self.trials_data.append(trial_data)
         return trial_data
-
 
 
 
@@ -383,13 +487,10 @@ class Representations(object):
         self.categories = None
         self.vec_len = None
 
-
     def __repr__(self):
         return f"Representations object with {len(self.representations)} items from {self.categories} categories"
 
-
-    def save_representations(self, item_codes, cat_codes, combined_codes,
-                             params):
+    def save_representations(self, item_codes, cat_codes, combined_codes, params):
         # add some helper
         item_per_cat = params["num_loc_items"] // len(params["categories"])
         num_categories = len(params["categories"])
@@ -445,15 +546,15 @@ class UpdateMechanism(object):
         "fixation": {
             "external": {"visual": "noise",
                          "verbal": "noise",},
-            "memory": {"echo_layers": ["visual", "verbal"],
-                       "noise_layers": [],
+            "memory": {"echo_layers": [],
+                       "noise_layers": ["visual", "verbal"],
                        "tau_dilation": 1},
         },
         "encode": {
             "external": {"visual": "representation",
                          "verbal": "noise"},
-            "memory": {"echo_layers": [],
-                       "noise_layers": ["visual", "verbal"],
+            "memory": {"echo_layers": ["visual", "verbal"],
+                       "noise_layers": [],
                        "tau_dilation": 1},
 
         },
@@ -474,10 +575,17 @@ class UpdateMechanism(object):
         "suppress": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual"], # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal"], # "verbal"
                        "noise_layers": [],
-                       "tau_dilation": 0.75}
-        }
+                       "tau_dilation": 0.3}
+        },
+        "clear": {
+            "external": {"visual": "noise",
+                         "verbal": "noise", },
+            "memory": {"echo_layers": [],
+                       "noise_layers": ["visual", "verbal"],
+                       "tau_dilation": 1},
+        },
     }
     def __init__(self,
                  rng,
@@ -572,7 +680,7 @@ class UpdateMechanism(object):
         for i, probe_vector in enumerate(probe):
             similarity[i, :] = np.dot(memstack[:, i], probe_vector)
         # remove the non-computed layers
-        keep_layers = np.array([True if l in probe_layers else False for l in layers_dict.keys()])
+        keep_layers = np.array([True if l in probe_layers else False for l in sorted(layers_dict, key=lambda x: layers_dict[x])])
         similarity = np.delete(similarity, ~keep_layers, axis=0).squeeze()
         # nonlinear scaling of the similarity values  (pulled from cmrwm-Polyn)
         if self.params["tau_style"] == 'power':
@@ -584,7 +692,7 @@ class UpdateMechanism(object):
         elif self.params["tau_style"] == 'sigmoid':
             scaled_similarity = 1 / (1 + np.exp(-(tau * similarity)))
         elif self.params["tau_style"] == 'softmax':
-            mult_vals = softmax(similarity)
+            scaled_similarity = softmax(similarity)
         else:
             # if the tau_style string is not in the list above
             raise SyntaxError('tau_style not recognized')
@@ -670,9 +778,69 @@ class UpdateMechanism(object):
                                    incoming_state=incoming_state)
 
 
+class BehavioralOutputMechanism(object):
+    def __init__(self,
+                 rng,
+                 representations: Representations,
+                 memories: Memories,
+                 params: dict):
 
+        self.rng = rng
+        self.params = params
+        self.memories = memories
+        self.representations = representations
+        self.test_results = None
 
-
+    def run_memory_test(self,
+                        stim_df,
+                        mem_type,
+                        support_layer="all",
+                        memories=None,
+                        tau=1):
+        """
+        Performs a LTM test
+        :param memories:
+        :return:
+        """
+        # query memories
+        memories = self.memories.get_current_memories(source="task") if memories is None else memories
+        # recode support layer
+        if support_layer == "all":
+            support_layer = list(layers_dict.values())
+        elif type(support_layer) is str:
+            support_layer = [layers_dict[support_layer]]
+        elif type(support_layer) is list:
+            support_layer = [layers_dict[s] for s in support_layer]
+        else:
+            raise TypeError(f'support_layer type {type(support_layer)} not recognized')
+        # initiate dict to store support values
+        support_dict = {o: {c: [] for c in self.params["categories"]} for o in self.params["operations"]}
+        # iterate through all stims
+        for r_num, r in stim_df.iterrows():
+            encoded_item = f"{r.category}_{r.stim}"
+            encoded_representation = self.representations.query_representations(item=encoded_item)[0]
+            if mem_type == "ltm":
+                start = 0
+                end = len(memories)
+            elif mem_type == "disc_wm":
+                start = r_num * self.params["timesteps_per_phase"] * 3 + r_num * self.params["iti"]
+                end = (r_num + 1) * self.params["timesteps_per_phase"] * 3 + (r_num + 1) * self.params["iti"]
+            elif mem_type == "cum_wm":
+                start = 0
+                end = (r_num + 1) * self.params["timesteps_per_phase"] * 3 + (r_num + 1) * self.params["iti"]
+            else:
+                raise ValueError(f'mem_type {mem_type} not recognized')
+            # Calculate summed similarity across all layers
+            similarity = np.einsum("elf,lf->el",
+                                   memories[start:end, support_layer],
+                                   encoded_representation[support_layer])
+            summed_similarity = np.einsum("el->e", similarity)
+            # Pass similarity through activation function and sum
+            support = np.exp(-tau * (1 - summed_similarity)).sum()
+            # Save the mean of the support
+            support_dict[r.operation][r.category].append(support)
+        self.test_results = support_dict
+        return support_dict
 
 
 
