@@ -241,6 +241,7 @@ def _summarize_cat_timecourse(exp,
 def timecourse_cat_decoding(exp_list,
                             params,
                             n_jobs=-1,
+                            title=None,
                             **kwargs,
                             ):
     """
@@ -280,8 +281,9 @@ def timecourse_cat_decoding(exp_list,
     pattern = "|".join(map(re.escape, ["ual", "bal", "{", "}", ":", "'", " "]))
     echweights = re.sub(pattern, "", str(params["echo_weights"]))
     #  echoWeights={echweights}
-    plt.title(
-        f"t={params['tau']}, tStyle={params["tau_style"]}, pt={params["post_tau"]}, ptStyle={params["post_tau_style"]}, ic={params['ic_ratio']},em={params['em_ratio']},b={params['beta']}")
+    title = title if title is not None else \
+        f"t={params['tau']}, tStyle={params["tau_style"]}, pt={params["post_tau"]}, ptStyle={params["post_tau_style"]}, ic={params['ic_ratio']},em={params['em_ratio']},b={params['beta']}"
+    plt.title(title)
     plt.show()
     return results_arr
 

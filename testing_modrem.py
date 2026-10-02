@@ -16,57 +16,65 @@ mem_params = {  # Experiment design
     "trial_reset": False,
     # Model design
     "vec_len": 10,
-    "loc_layers": ["visual", "verbal"],
-    # "main_layers": ["visual", "verbal"],
+    "representation_layers": ["visual", "verbal"],
+    "memory_layers": ["visual", "verbal", "temporal"],# ],
     "clf_layers": ["visual"],
-    "ic_ratio": 1,    # item vs category ratio
-    "em_ratio": 0.6,    # external vs memory ratio
+    "ic_ratio": 1,  # item vs category ratio
+    "em_ratio": 0.6,  # external vs memory ratio
+    "em_temporal_ratio": 2,
     "beta": 0.75,
+    "beta_temporal": 0.075,
     "tau_style": "exp",
     "tau": 8,
-    "post_tau_style": "linear",    # ["exp", "power", "linear"]
+    "post_tau_style": "linear",  # ["exp", "power", "linear"]
     "post_tau": np.nan,
     "mem_source": "combined",
-    "snr": 5,    # signal-to-noise ratio (not implemented)
     "echo_weights": {
         "visual": 1,
         "verbal": 1,
-    },    # allows for
+        "temporal": 0.25,
+    },  # allows for
     "update_rules": {
-
         "encode": {
             "external": {"visual": "representation",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal"], # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal", "temporal"],  # "verbal", "temporal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "replace": {
             "external": {"visual": "noise",
                          "verbal": "representation"},
-            "memory": {"echo_layers": ["verbal"], # "visual",
+            "memory": {"echo_layers": ["verbal", "temporal"],  # "visual", "temporal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal"], # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal", "temporal"],  # "verbal", "temporal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "suppress": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal"], # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal", "temporal"],  # "verbal", "temporal"
                        "noise_layers": [],
                        "tau_dilation": 0.3}
         },
         "clear": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": [],  # "verbal"
+            "memory": {"echo_layers": ["temporal"],  # "temporal"
                        "noise_layers": ["visual", "verbal"],
+                       "tau_dilation": 1},
+        },
+        "noise": {
+            "external": {"visual": "noise",
+                         "verbal": "noise", },
+            "memory": {"echo_layers": [],
+                       "noise_layers": ["visual", "verbal", "temporal"],
                        "tau_dilation": 1},
         },
     },
@@ -75,34 +83,63 @@ mem_params = {  # Experiment design
     "hrf": True,
     "unique_items": True,
 }
+# %% ### Run a single participant
+em_ratios = [0.5, 1, 2, 4, 8]
+betas = [0.05, 0.1, 0.2, 0.6]
+combs = [(b, e) for e in em_ratios for b in betas]
+for b, r in combs:
+    mem_params["beta_temporal"] = b
+    mem_params["em_temporal_ratio"] = r
+    exp = ke.simulate_participant(params=mem_params,
+                                  diagnostic=False)
+
+    exp.plot_all_context_rsa(plot_previous=True,
+                             title=f"em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}")
 
 
-exp_list = ke.simulate_full_experiment(params=mem_params,
-                                       n_participants=30,
-                                       n_jobs=10)
-
-
-# # Graph 4a: Timecourse for neural decoding of a WM item
-# results_arr = ke.timecourse_cat_decoding(exp_list=exp_list,
-#                                          params=mem_params,
-#                                          shifted=True,
-#                                          oversampling=20,
-#                                          tr=0.6,
-#                                          shift_delay=4.6,
-#                                          )
-ke.graph_operDiff_itemRSA(exp_list=exp_list,
-                          params=mem_params,
-                          fisher=True,
-                          layers="visual",
-                          shifted=True,
-                          oversampling=20,
-                          tr=0.6,
-                          shift_delay=4.6,
-                          ylim=(-0.36,0.07)
-                          )
+#
+# #%%
+# mem_params["em_temporal_ratio"] = 32
+# for i in 2 ** np.arange(2, 6):
+#     mem_params["em_temporal_ratio"] = i
+    exp_list = ke.simulate_full_experiment(params=mem_params,
+                                           n_participants=30,
+                                           n_jobs=10)
+    # # Graph 4a: Timecourse for neural decoding of a WM item
+    results_arr = ke.timecourse_cat_decoding(exp_list=exp_list,
+                                             params=mem_params,
+                                             shifted=True,
+                                             oversampling=20,
+                                             tr=0.6,
+                                             shift_delay=4.6,
+                                             title=f"em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}"
+                                             )
+    # Graph 5b: WM Operation impact on encoding fidelity
+    ke.graph_proactive_interference(exp_list=exp_list,
+                                    params=mem_params,
+                                    fisher=True,
+                                    balance=True,
+                                    layers="visual",
+                                    exclude_rep_sameCat=True,
+                                    timepoints="all",
+                                    n_jobs=10,
+                                    plot_delta=True,
+                                    )
+    # ke.graph_operDiff_itemRSA(exp_list=exp_list,
+    #                           params=mem_params,
+    #                           fisher=True,
+    #                           layers="visual",
+    #                           shifted=True,
+    #                           oversampling=20,
+    #                           tr=0.6,
+    #                           shift_delay=4.6,
+    #                           ylim=(-0.36, 0.07)
+    #                           )
 
 ####################################################################################################################
 # %% ### Simulate a single trial
+mem_params["beta_temporal"] = 0.4
+mem_params["em_temporal_ratio"] = 0.5
 # Initiate the experiment object
 Exp = Modrem_Exp(mem_params)
 #  Initiate localizer memories
@@ -115,6 +152,9 @@ Exp.reset_task_memories()
 Exp.reset_current_trial()
 Exp.initialize_trial(category="scene")
 Exp.initialize_replacement(category="fruit")
+previous_temporal_representation = Exp.current_state[2]
+print("next:\n", Exp.next_temporal_representation)
+print("prev:\n", Exp.current_state[2])
 current_trial = []
 vis_sim = []
 ver_sim = []
@@ -122,6 +162,20 @@ comb_sim = []
 # Start off with some noise timesteps
 for n in range(2):
     Exp.simulate_step(phase="noise", )
+##
+# for n in range(30):
+#     Exp.simulate_step(phase="noise", )
+# print(Exp.current_state[2])
+# # plot the temporal similarity
+# sim = Exp.plot_trial_context_rsa(title=f"em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}")
+# # do it again
+# for n in range(30):
+#     Exp.simulate_step(phase="noise", )
+# print(Exp.current_state[2])
+# # plot the temporal similarity
+# sim = Exp.plot_trial_context_rsa(title=f"em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}")
+
+
 num_enc = 10
 encode_phase = "encode"
 for n in range(num_enc):
@@ -188,75 +242,87 @@ for n in range(10):
 
     current_step = Exp.simulate_step(phase=oper,
                                      diagnostic=False, )
+#
+# # Plot all three similarity traces for each step
+# for s in range(len(vis_sim)):
+#     fig, ax = plt.subplots()
+#     x = np.arange(len(vis_sim[s]))
+#     # ax.plot(x, np.cumsum(vis_sim[s]), label="visual", color="blue", alpha=0.5)
+#     # ax.plot(x, np.cumsum(ver_sim[s]), label="verbal", color="green", alpha=0.5)
+#     # ax.plot(x, np.cumsum(comb_sim[s]), label="combined", color="black")
+#     ax.plot(x, vis_sim[s], label="visual", color="blue", alpha=0.5)
+#     ax.plot(x, ver_sim[s], label="verbal", color="green", alpha=0.5)
+#     ax.plot(x, comb_sim[s], label="combined", color="black")
+#     ax.axvline(269, color="r", linestyle="--", label="end of localizer")
+#     # also plot a line for the encoded image and the replacement image in the localizer
+#     for r_rep in np.unique(np.where(Exp.memories.loc_memories == Exp.replacement_representation)[0]):
+#         ax.axvline(r_rep, color="darkblue", linestyle="--", label="replacement image in loc", alpha=0.2)
+#     for e_rep in np.unique(np.where(Exp.memories.loc_memories == Exp.encoding_representation)[0]):
+#         ax.axvline(e_rep, color="black", linestyle="--", label="encoding image in loc", alpha=0.2)
+#
+#     phase = "encode" if s < 10 else oper
+#     secax_y = ax.secondary_yaxis('right', transform=ax.transData)
+#     secax_y.set_ylabel('cumulative sum')
+#     # ax.legend()
+#     plt.title(f"Step {s} tau:{mem_params['post_tau']} phase:{phase}")
+#     plt.ylim(0, 1)
+#     plt.ylabel("similarity")
+#     plt.show()
+#
+# # plot similarity to encoding representation
+# arr = np.asarray(Exp.current_trial)
+# x = np.arange(arr.shape[0])
+# fig, ax = plt.subplots()
+# for l, layer in enumerate(["visual", "verbal"]):
+#     y = np.dot(arr[:, l], Exp.encoding_representation[l])
+#     ax.plot(x, y, label=layer)
+# plt.axvline(num_enc + 2, color="k", linestyle="--")
+# plt.ylim(-1, 1.3)
+# plt.title(f"Similarity to encoding state tau{mem_params['post_tau']} oper:{oper}")
+# plt.legend()
+# plt.show()
+#
+# arr = np.asarray(Exp.current_trial)
+# x = np.arange(arr.shape[0])
+# fig, ax = plt.subplots()
+# for l, layer in enumerate(["visual", "verbal"]):
+#     y = np.dot(arr[:, l], Exp.replacement_representation[l])
+#     ax.plot(x, y, label=layer)
+# plt.axvline(num_enc + 2, color="k", linestyle="--")
+# plt.ylim(-1, 1.3)
+# plt.title(f"Similarity to replacement state tau{mem_params['post_tau']}")
+# plt.legend()
+# plt.show()
+#
+# rocauc_arr = np.zeros((len(Exp.current_trial),
+#                        mem_params["num_categories"]))
+# for t, tp in enumerate(Exp.current_trial):
+#     rocauc_arr[t] = Exp.clf.predict_proba(tp[0].reshape(1, -1))
+# # plot
+# fig, ax = plt.subplots()
+# x = np.arange(rocauc_arr.shape[0])
+# for c, cls in enumerate(mem_params["categories"]):
+#     ax.plot(x, rocauc_arr[:, c], label=cls)
+# plt.legend()
+# plt.axvline(num_enc + 2, color="k", linestyle="--")
+# plt.title(f"Probas tau:{mem_params['post_tau']}")
+# plt.show()
 
-# Plot all three similarity traces for each step
-for s in range(len(vis_sim)):
-    fig, ax = plt.subplots()
-    x = np.arange(len(vis_sim[s]))
-    # ax.plot(x, np.cumsum(vis_sim[s]), label="visual", color="blue", alpha=0.5)
-    # ax.plot(x, np.cumsum(ver_sim[s]), label="verbal", color="green", alpha=0.5)
-    # ax.plot(x, np.cumsum(comb_sim[s]), label="combined", color="black")
-    ax.plot(x, vis_sim[s], label="visual", color="blue", alpha=0.5)
-    ax.plot(x, ver_sim[s], label="verbal", color="green", alpha=0.5)
-    ax.plot(x, comb_sim[s], label="combined", color="black")
-    ax.axvline(269, color="r", linestyle="--", label="end of localizer")
-    # also plot a line for the encoded image and the replacement image in the localizer
-    for r_rep in np.unique(np.where(Exp.memories.loc_memories == Exp.replacement_representation)[0]):
-        ax.axvline(r_rep, color="darkblue", linestyle="--", label="replacement image in loc", alpha=0.2)
-    for e_rep in np.unique(np.where(Exp.memories.loc_memories == Exp.encoding_representation)[0]):
-        ax.axvline(e_rep, color="black", linestyle="--", label="encoding image in loc", alpha=0.2)
+# plot the temporal similarity
+Exp.plot_trial_context_rsa(plot_previous=True,
+                           title=f"em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}")
+# ext_input = Exp.update_mechanism.build_external_input(spec=mem_params["update_rules"]["encode"],
+#                                                       item=Exp.encoding_item_name,
+#                                                       context=Exp.next_temporal_representation)
 
-    phase = "encode" if s < 10 else oper
-    secax_y = ax.secondary_yaxis('right', transform=ax.transData)
-    secax_y.set_ylabel('cumulative sum')
-    # ax.legend()
-    plt.title(f"Step {s} tau:{mem_params['post_tau']} phase:{phase}")
-    plt.ylim(0, 1)
-    plt.ylabel("similarity")
-    plt.show()
 
-# plot similarity to encoding representation
-arr = np.asarray(Exp.current_trial)
-x = np.arange(arr.shape[0])
-fig, ax = plt.subplots()
-for l, layer in enumerate(["visual", "verbal"]):
-    y = np.dot(arr[:, l], Exp.encoding_representation[l])
-    ax.plot(x, y, label=layer)
-plt.axvline(num_enc + 2, color="k", linestyle="--")
-plt.ylim(-1, 1.3)
-plt.title(f"Similarity to encoding state tau{mem_params['post_tau']} oper:{oper}")
-plt.legend()
-plt.show()
+# exp.plot_all_context_rsa()
 
-arr = np.asarray(Exp.current_trial)
-x = np.arange(arr.shape[0])
-fig, ax = plt.subplots()
-for l, layer in enumerate(["visual", "verbal"]):
-    y = np.dot(arr[:, l], Exp.replacement_representation[l])
-    ax.plot(x, y, label=layer)
-plt.axvline(num_enc + 2, color="k", linestyle="--")
-plt.ylim(-1, 1.3)
-plt.title(f"Similarity to replacement state tau{mem_params['post_tau']}")
-plt.legend()
-plt.show()
-
-rocauc_arr = np.zeros((len(Exp.current_trial),
-                       mem_params["num_categories"]))
-for t, tp in enumerate(Exp.current_trial):
-    rocauc_arr[t] = Exp.clf.predict_proba(tp[0].reshape(1, -1))
-# plot
-fig, ax = plt.subplots()
-x = np.arange(rocauc_arr.shape[0])
-for c, cls in enumerate(mem_params["categories"]):
-    ax.plot(x, rocauc_arr[:, c], label=cls)
-plt.legend()
-plt.axvline(num_enc + 2, color="k", linestyle="--")
-plt.title(f"Probas tau:{mem_params['post_tau']}")
-plt.show()
-
-#%% ### Run a single participant
+# %% ### Run a single participant
 exp = ke.simulate_participant(params=mem_params,
                               diagnostic=False)
+
+exp.plot_all_context_rsa(plot_previous=True,)
 
 # %% ### Run a single experiment
 diagnostic = False
@@ -284,7 +350,6 @@ exp_list = ke.simulate_full_experiment(params=mem_params,
                                        n_participants=30,
                                        n_jobs=10)
 
-
 # Graph 4a: Timecourse for neural decoding of a WM item
 results_arr = ke.timecourse_cat_decoding(exp_list=exp_list,
                                          params=mem_params,
@@ -311,7 +376,7 @@ ke.graph_operDiff_itemRSA(exp_list=exp_list,
                           oversampling=20,
                           tr=0.6,
                           shift_delay=4.6,
-                          ylim=(-0.33,0.04)
+                          ylim=(-0.33, 0.04)
                           )
 # Graph 5b: WM Operation impact on encoding fidelity
 ke.graph_proactive_interference(exp_list=exp_list,
@@ -323,15 +388,15 @@ ke.graph_proactive_interference(exp_list=exp_list,
                                 timepoints="all",
                                 n_jobs=-1,
                                 )
-# Memory test
-beh_results = ke.summarize_memory_test(exp_list=exp_list,
-                                       mem_type="ltm",
-                                       support_layer="visual",
-                                       tau=40)
+# # Memory test
+# beh_results = ke.summarize_memory_test(exp_list=exp_list,
+#                                        mem_type="ltm",
+#                                        support_layer="visual",
+#                                        tau=40)
 
 for i in range(3):
     exp_list = ke.simulate_full_experiment(params=mem_params,
-                                           n_participants=300,
+                                           n_participants=30,
                                            n_jobs=10)
     # Graph 5b: WM Operation impact on encoding fidelity
     ke.graph_proactive_interference(exp_list=exp_list,
@@ -344,15 +409,14 @@ for i in range(3):
                                     n_jobs=-1,
                                     plot_delta=True,
                                     )
-
-    for layer in ["visual", "all"]:
-        for memtype in ["ltm", "disc_wm", "cum_wm"]:
-            beh_results = ke.summarize_memory_test(exp_list=exp_list,
-                                                   mem_type=memtype,
-                                                   support_layer=layer,
-                                                   tau=12,
-                                                   savefig=f"figures/{memtype}_{layer}_{i}.png", )
-
+    #
+    # for layer in ["visual", "all"]:
+    #     for memtype in ["ltm", "disc_wm", "cum_wm"]:
+    #         beh_results = ke.summarize_memory_test(exp_list=exp_list,
+    #                                                mem_type=memtype,
+    #                                                support_layer=layer,
+    #                                                tau=12,
+    #                                                savefig=f"figures/{memtype}_{layer}_{i}.png", )
 
 ####################################################################################################################
 # %% ### Gridsearch through parameters
@@ -392,11 +456,13 @@ for i in range(3):
 
 x = np.linspace(-6, 6, 1000)
 
+
 # Normal PDF function
 def normal_pdf(x, mean=0, sd=1):
     return (1 / (sd * np.sqrt(2 * np.pi))) * np.exp(
         -0.5 * ((x - mean) / sd) ** 2
     )
+
 
 # Parameters
 mean = 0

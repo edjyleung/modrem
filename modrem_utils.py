@@ -1,19 +1,20 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import logging
+import warnings
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import PredefinedSplit
 from sklearn.preprocessing import LabelEncoder
 
-from scipy.stats import gamma
+from scipy.stats import gamma, sem
 from scipy.special import softmax
 
 layers_dict = {"visual": 0,
                "verbal": 1,
-              # "location": 2,
-              # "temporal": 3,
+               "temporal": 2,
+               # "location": 3,
                }
 
 
@@ -43,21 +44,23 @@ class Modrem_Exp(object):
         "unique_items": False,
         # Model design
         "vec_len": 10,
-        "loc_layers": ["visual", "verbal"],
-        # "main_layers": ["visual", "verbal"],
+        "representation_layers": ["visual", "verbal"],
+        "memory_layers": ["visual", "verbal", "temporal"],
         "clf_layers": ["visual"],
         "ic_ratio": 1,    # item vs category ratio
         "em_ratio": 0.6,    # external vs memory ratio
+        "em_temporal_ratio": 2,
         "beta": 0.75,
+        "beta_temporal": 0.075,
         "tau_style": "exp",
         "tau": 8,
         "post_tau_style": "linear",    # ["exp", "power", "linear"]
         "post_tau": np.nan,
         "mem_source": "combined",
-        "snr": 5,    # signal-to-noise ratio (not implemented)
         "echo_weights": {
             "visual": 1,
             "verbal": 1,
+            "temporal": 1,
         },
         "update_rules": {},
         "init_state": "noise",
@@ -76,10 +79,12 @@ class Modrem_Exp(object):
         self.rng = np.random.default_rng(seed=seed)
         # Initiate attributes to store current experiment states
         self.current_state = self.initialize_state(init_state=self.params["init_state"])
+        self.previous_state = self.current_state
         self.encoding_representation = None
         self.encoding_item_name = None
         self.replacement_representation = None
         self.replacement_item_name = None
+        self.next_temporal_representation = None
         # Store current trial
         self.current_trial = []
         #
@@ -248,17 +253,19 @@ class Modrem_Exp(object):
     def create_loc_memories(self, params:dict = None):
         if params is None:
             params = self.params
-        item_arr = np.zeros((params["num_loc_items"],
-                              len(layers_dict),
-                              params["vec_len"]))
-        cat_arr = np.zeros((params["num_categories"],
-                            len(layers_dict),
-                            params["vec_len"]))
-        combined_arr = np.zeros((params["num_loc_items"],
-                              len(layers_dict),
-                              params["vec_len"]))
-        for layer in params["loc_layers"]:
-            # first create visual codes
+        ## Generate the verdical representations
+        # separately save the item, category and combined vectors
+        item_arr = unit_length(np.ones((params["num_loc_items"],
+                                        len(layers_dict),
+                                        params["vec_len"])))
+        cat_arr = unit_length(np.ones((params["num_categories"],
+                                       len(layers_dict),
+                                       params["vec_len"])))
+        combined_arr = unit_length(np.ones((params["num_loc_items"],
+                                            len(layers_dict),
+                                            params["vec_len"])))
+        # Only create item and category codes for visual and verbal layers
+        for layer in params["representation_layers"]:
             item_layer, cat_layer, combined_layer = self._create_item_codes(params["vec_len"],
                                                                             params["num_loc_items"],
                                                                             len(params["categories"]),
@@ -266,15 +273,20 @@ class Modrem_Exp(object):
             item_arr[:, layers_dict[layer]] = item_layer
             cat_arr[:, layers_dict[layer]] = cat_layer
             combined_arr[:, layers_dict[layer]] = combined_layer
-        # Save the generated codes into representations object
+        # Save the generated codes (veridical representations) into representations object
         representations = self.representations.save_representations(item_codes=item_arr,
                                                                     cat_codes=cat_arr,
                                                                     combined_codes=combined_arr,
                                                                     params=params)
+        # Now generate the memories
         loc_memories = []
         labels = []
         for n in range(params["num_loc_repeats"]):
             for name, code in representations["combined"].items():
+                if "temporal" in params["memory_layers"]:
+                    code[layers_dict["temporal"]] = simulate_normalized_noise(rng=self.rng,
+                                                                              size=(1,
+                                                                                    params["vec_len"]))
                 loc_memories.append(code)
                 labels.append(name.rsplit("_", 1)[0])
         # save to memories object
@@ -289,7 +301,7 @@ class Modrem_Exp(object):
         else:
             print(f"Unknown init state: {init_state}")
 
-    def initialize_trial(self, category=None, item=None):
+    def initialize_trial(self, category=None, item=None, trial_num=None):
         if self.params["trial_reset"]:
             self.reset_current_trial()
         # Add the current state to the list of time steps in current trial
@@ -297,6 +309,14 @@ class Modrem_Exp(object):
         # Also choose an image to be encoded
         self.encoding_representation, self.encoding_item_name = self.representations.query_representations(category=category,
                                                                                                            item=item,)
+        # also initialize a ("target") temporal representation for that trial
+        self.next_temporal_representation = simulate_normalized_noise(rng=self.rng,
+                                                                      size=(1, self.params["vec_len"]))
+        # save the current state into the previous state
+        self.previous_state = self.current_state
+        # Also save the context vector into the representations object
+        self.representations.save_context_vector(context_vector=self.next_temporal_representation,
+                                                 trial_num=trial_num)
         return None
 
     def initialize_replacement(self, category=None, item=None):
@@ -315,6 +335,90 @@ class Modrem_Exp(object):
     def get_clf_layer_inds(self):
         return [layers_dict[l] for l in self.params["clf_layers"]]
 
+    def plot_trial_context_rsa(self,
+                               probe=None,
+                               title=None,
+                               plot_previous=True,):
+        """
+        plots current trial context as similarity to probe
+        :return:
+        """
+        if probe is None:
+            probe = self.next_temporal_representation
+            probe_name = "trial temporal representation"
+        else:
+            probe = np.asarray(probe)
+            probe_name = "custom probe"
+        similarity = np.einsum("tf, f -> t",
+                               np.asarray(self.current_trial)[:, layers_dict["temporal"]],
+                               probe.squeeze())
+        fig, ax = plt.subplots()
+        plt.plot(similarity, label="next temporal representation")
+        if plot_previous:
+            prev_probe = self.previous_state[layers_dict["temporal"]]
+            prev_similarity = np.einsum("tf, f -> t",
+                                        np.asarray(self.current_trial)[:, layers_dict["temporal"]],
+                                        prev_probe.squeeze())
+            plt.plot(prev_similarity, label="previous temporal representation")
+        plt.legend()
+        title = title if title is not None else f"rsa of current trial to {probe_name}"
+        plt.title(title)
+        plt.show()
+        return similarity
+
+    def plot_all_context_rsa(self,
+                             plot_previous=True,
+                             title=None,):
+        if self.stim_df is None:
+            raise ValueError("plot all context rsa cannot be performed before running experiment")
+        # Determine the trial length
+        trial_len = 2 + self.params["timesteps_per_phase"] * 3
+        # also pull the memstack
+        memstack = self.memories.get_current_memories(source=self.params["mem_source"])
+        # get the index of the first main trial
+        num_loc_memories = self.params["num_loc_items"] * self.params["num_loc_repeats"] - 1
+        # Calculate the similarity
+        similarity_list = []
+        prev_similarity_list = []
+        for trial_num in self.stim_df.index:
+            trial_context_memories = memstack[num_loc_memories + trial_num * trial_len : num_loc_memories + (trial_num + 1) * trial_len,
+                                     layers_dict["temporal"]]
+            trial_context_representation = self.representations.context_vectors[trial_num].squeeze()
+            similarity_list.append(
+                np.einsum("tf, f -> t", trial_context_memories, trial_context_representation)
+            )
+            if trial_num > 0:
+                prev_trial_context_representation = self.representations.context_vectors[trial_num - 1].squeeze()
+                prev_similarity_list.append(
+                    np.einsum("tf, f -> t", trial_context_memories, prev_trial_context_representation)
+                )
+        # obtain the mean and se
+        sim_mean = np.mean(similarity_list, axis=0)
+        sim_error = np.std(similarity_list, axis=0)
+        fig, ax = plt.subplots()
+        ax.plot(np.arange(trial_len), sim_mean, label="next context")
+        ax.fill_between(x=np.arange(trial_len),
+                        y1=sim_mean - sim_error,
+                        y2=sim_mean + sim_error,
+                        alpha=0.2,
+                        color="C0"
+                        )
+        if plot_previous:
+            prev_mean = np.mean(prev_similarity_list, axis=0)
+            prev_error = np.std(prev_similarity_list, axis=0)
+            ax.plot(np.arange(trial_len), prev_mean, label="previous context")
+            ax.fill_between(x=np.arange(trial_len),
+                            y1=prev_mean - prev_error,
+                            y2=prev_mean + prev_error,
+                            alpha=0.2,
+                            color="C1"
+                            )
+        plt.legend()
+        title = title if title is not None else f"average context similarity across all trials"
+        plt.title(title)
+        plt.show()
+        return None
+
     def plot_current_trial(self, **kwargs):
         probas = self.classify_timepoints()
         fig, ax = plt.subplots()
@@ -326,6 +430,7 @@ class Modrem_Exp(object):
         plt.legend()
         plt.show()
 
+
     def reset_current_trial(self):
         self.current_trial = []
         self.current_state = self.initialize_state(init_state=self.params["init_state"])
@@ -333,6 +438,9 @@ class Modrem_Exp(object):
         self.encoding_item_name = None
         self.replacement_item_name = None
         self.replacement_representation = None
+        self.next_temporal_representation = simulate_normalized_noise(self.rng,
+                                                                      size=(1,
+                                                                            self.params["vec_len"]))
 
     def reset_task_memories(self):
         self.memories.task_memories = None
@@ -344,29 +452,33 @@ class Modrem_Exp(object):
         else:
             self.stim_df = stim_df
         trials_list = []
-        for _, row in self.stim_df.iterrows():
+        for r_num, row in self.stim_df.iterrows():
             encode_item = "_".join([row.category, str(row.stim)])
             replace_item = "_".join([row.replace_category, str(row.replace_stim)])
-            # Initialize the trial
-            self.initialize_trial(item=encode_item)
+            # # Initialize the trial
+            # self.initialize_trial(item=encode_item,
+            #                       trial_num=r_num)
             # run the trial
             trials_list.append(self.simulate_trial(operation=row.operation,
                                                    encode_item=encode_item,
-                                                   replace_item=replace_item))
+                                                   replace_item=replace_item,
+                                                   trial_num=r_num))
         return trials_list
 
     def simulate_step(self, phase,
                       diagnostic=False):
+        # grab the representation of the item shown
         if phase == "encode":
             item_shown = self.encoding_item_name
         elif phase == "replace":
             item_shown = self.replacement_item_name
         else:
             item_shown = None
-
+        # Calculate the new step
         new_state = self.update_mechanism.step(phase=phase,
                                                current_state=self.current_state,
                                                item=item_shown,
+                                               context=self.next_temporal_representation,
                                                )
         if not diagnostic:
             # Now save the info into current trial
@@ -378,12 +490,14 @@ class Modrem_Exp(object):
     def simulate_trial(self, operation,
                        encode_item=None,
                        replace_item=None,
+                       trial_num=None,
                        diagnostic=False,
                        **kwargs):
         if self.params["trial_reset"]:
             self.reset_current_trial()
         # Initialize trial and replacement
-        self.initialize_trial(item=encode_item)
+        self.initialize_trial(item=encode_item,
+                              trial_num=trial_num)
         if operation == "replace":
             self.initialize_replacement(item=replace_item)
         else:
@@ -486,6 +600,7 @@ class Representations(object):
                                 "combined": {}}
         self.categories = None
         self.vec_len = None
+        self.context_vectors = {}
 
     def __repr__(self):
         return f"Representations object with {len(self.representations)} items from {self.categories} categories"
@@ -530,7 +645,13 @@ class Representations(object):
         logging.info(f"Incoming image is {incoming_img}")
         return self.representations["combined"][incoming_img], incoming_img
 
-
+    def save_context_vector(self,
+                            context_vector,
+                            trial_num=None,):
+        if trial_num is None:
+            trial_num = max(self.context_vectors.keys()) + 1 if self.context_vectors else 0
+        self.context_vectors[trial_num] = context_vector
+        return None
 
 
 
@@ -540,7 +661,7 @@ class UpdateMechanism(object):
             "external": {"visual": "noise",
                          "verbal": "noise",},
             "memory": {"echo_layers": [],
-                       "noise_layers": ["visual", "verbal"],
+                       "noise_layers": ["visual", "verbal", "temporal"],
                        "tau_dilation": 1},
         },
         "fixation": {
@@ -561,7 +682,7 @@ class UpdateMechanism(object):
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual"],  # "verbal"
+            "memory": {"echo_layers": ["visual", "verbal"],  # "verbal"
                        "noise_layers": [],
                        "tau_dilation": 1}
         },
@@ -598,7 +719,7 @@ class UpdateMechanism(object):
         self.memories = memories
         self.params = params
 
-    def build_external_input(self, spec, item):
+    def build_external_input(self, spec: dict, item: str, context: np.ndarray):
         external_spec = spec["external"]
         ext_state = np.zeros((len(layers_dict),
                               self.representations.vec_len))
@@ -610,6 +731,9 @@ class UpdateMechanism(object):
                 ext_state[layers_dict[layer]] = self.representations.query_representations(item=item)[0][layers_dict[layer]]
             else:
                 raise NotImplementedError(f"unknown source for external input: {source}")
+        if "temporal" in self.params["memory_layers"]:
+            # print("feeding external context into temporal layer")
+            ext_state[layers_dict["temporal"]] = context
         return ext_state
 
     def build_memory_input(self, spec, current_state):
@@ -642,7 +766,7 @@ class UpdateMechanism(object):
         # pull the memstack
         memstack = self.get_memstack()
         if not probe_layers:
-            return np.zeros((probe.shape[0], probe.shape[1]))
+            return np.ones((probe.shape[0], probe.shape[1]))
         # pull the scaled similarity
         similarity = self.calc_similarity(probe=probe,
                                           probe_layers=probe_layers,
@@ -670,7 +794,7 @@ class UpdateMechanism(object):
                         memstack,
                         tau=None):
         # Declare tau
-        tau = tau or self.params["tau"]
+        tau = self.params["tau"] if tau is None else tau
         similarity = np.zeros((len(layers_dict), len(memstack)))
         # Convert probe layers to list if type is not list
         probe_layers = [probe_layers] if type(probe_layers) is not list else probe_layers
@@ -709,10 +833,16 @@ class UpdateMechanism(object):
         # Then order it by the layers dict
         probe_layers = [l for l in sorted(layers_dict, key=lambda x: layers_dict[x]) if l in probe_layers]
         # declare tau
-        tau = tau or self.params["post_tau"]
+        tau = self.params["post_tau"] if tau is None else tau
         mult_vals = np.ones((similarity.shape[-1],))
+        # instantiate the echo weights into an array
+        echo_weights = np.asarray([self.params["echo_weights"][l] for l in sorted(layers_dict, key=lambda x: layers_dict[x])])
+        # added weight similarity across layers
+        if self.params["tau_style"] == "linear" and not (echo_weights == 1).all():
+            warnings.warn("echo weights cannot be applied to raw similarity values. Ignoring echo weights")
+            echo_weights = np.ones_like(echo_weights)
         for n_layer in range(similarity.shape[0]):
-            mult_vals *= (similarity[n_layer, :] * self.params["echo_weights"][probe_layers[n_layer]])
+            mult_vals *= similarity[n_layer, :] ** echo_weights[n_layer]
         # nonlinear scaling of the similarity values
         if self.params["post_tau_style"] == 'power':
             mult_vals = mult_vals ** tau
@@ -731,17 +861,21 @@ class UpdateMechanism(object):
 
     def calc_new_state(self,
                        current_state,
-                       incoming_state):
+                       incoming_state,):
         """
         Calculates new state by updating state across layer
         :return:
         """
-        beta = self.params["beta"]
         # Initiate new information with zeros
         new_state = np.full((len(layers_dict),
                              self.params["vec_len"]),
                             np.nan)
-        for layer_ind in layers_dict.values():
+        for layer, layer_ind in layers_dict.items():
+            # choose beta
+            if layer == "temporal":
+                beta = self.params["beta_temporal"]
+            else:
+                beta = self.params["beta"]
             # calculate new current state
             curr_in_similarity = np.dot(current_state[layer_ind], incoming_state[layer_ind])
             # Calculate Rho
@@ -756,9 +890,11 @@ class UpdateMechanism(object):
              phase: str,
              current_state: np.ndarray,
              item: str,
+             context: np.ndarray,
              ):
         """
         Takes a time step by updating the current state to a new state using phase rules
+        :param context:
         :param phase:
         :param current_state:
         :param item:
@@ -768,12 +904,15 @@ class UpdateMechanism(object):
         spec = self.update_rules[phase]
         # Get the external input
         # print(f"item for step is {item}")
-        ext_input = self.build_external_input(spec=spec, item=item)
+        ext_input = self.build_external_input(spec=spec, item=item, context=context)
         # As well as the memory input
         mem_input = self.build_memory_input(spec=spec, current_state=current_state)
-
+        # define an em_ratio array
+        em_ratio = np.asarray(
+            [self.params["em_ratio"] if l != "temporal" else self.params["em_temporal_ratio"] for l in layers_dict]
+        ).reshape(-1, 1)
         # Then combine external input and memory input based on mixing ratio
-        incoming_state = unit_length(ext_input * self.params["em_ratio"] + mem_input)
+        incoming_state = unit_length(ext_input * em_ratio + mem_input)
         return self.calc_new_state(current_state=current_state,
                                    incoming_state=incoming_state)
 
