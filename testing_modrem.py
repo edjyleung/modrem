@@ -32,7 +32,7 @@ mem_params = {  # Experiment design
     "echo_weights": {
         "visual": 1,
         "verbal": 1,
-        "temporal": 0.25,
+        "temporal": 1,
     },  # allows for
     "update_rules": {
         "encode": {
@@ -45,28 +45,28 @@ mem_params = {  # Experiment design
         "replace": {
             "external": {"visual": "noise",
                          "verbal": "representation"},
-            "memory": {"echo_layers": ["verbal", "temporal"],  # "visual", "temporal"
+            "memory": {"echo_layers": ["verbal"],  # "visual", "temporal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "maintain": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal", "temporal"],  # "verbal", "temporal"
+            "memory": {"echo_layers": ["visual", "verbal"],  # "verbal", "temporal"
                        "noise_layers": [],
                        "tau_dilation": 1},
         },
         "suppress": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["visual", "verbal", "temporal"],  # "verbal", "temporal"
+            "memory": {"echo_layers": ["visual", "verbal"],  # "verbal", "temporal"
                        "noise_layers": [],
                        "tau_dilation": 0.3}
         },
         "clear": {
             "external": {"visual": "noise",
                          "verbal": "noise"},
-            "memory": {"echo_layers": ["temporal"],  # "temporal"
+            "memory": {"echo_layers": [],  # "temporal"
                        "noise_layers": ["visual", "verbal"],
                        "tau_dilation": 1},
         },
@@ -85,16 +85,18 @@ mem_params = {  # Experiment design
 }
 # %% ### Run a single participant
 em_ratios = [0.5, 1, 2, 4, 8]
-betas = [0.05, 0.1, 0.2, 0.6]
+betas = [0.05, 0.1]
 combs = [(b, e) for e in em_ratios for b in betas]
 for b, r in combs:
     mem_params["beta_temporal"] = b
     mem_params["em_temporal_ratio"] = r
+    title = f"EqEchoWeight NoTempEcho em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}"
     exp = ke.simulate_participant(params=mem_params,
                                   diagnostic=False)
 
     exp.plot_all_context_rsa(plot_previous=True,
-                             title=f"em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}")
+                             title=title,
+                             )
 
 
 #
@@ -112,7 +114,7 @@ for b, r in combs:
                                              oversampling=20,
                                              tr=0.6,
                                              shift_delay=4.6,
-                                             title=f"em_temp_ratio:{mem_params["em_temporal_ratio"]} beta_temp:{mem_params["beta_temporal"]}"
+                                             title=title,
                                              )
     # Graph 5b: WM Operation impact on encoding fidelity
     ke.graph_proactive_interference(exp_list=exp_list,
